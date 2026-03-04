@@ -15,10 +15,16 @@
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js"
   },
-  "keywords": ["mcp", "hx-multianim", "heaps", "haxe", "game-dev"],
+  "keywords": [
+    "mcp",
+    "hx-multianim",
+    "heaps",
+    "haxe",
+    "game-dev"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/bh213/hx-multianim-mcp.git"
+    "url": "git+https://github.com/bh213/hx-multianim-mcp.git"
   },
   "author": "bh213",
   "license": "BSD-3-Clause",
