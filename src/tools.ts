@@ -198,4 +198,165 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
+
+  // ======== v2: Game Control ========
+
+  server.registerTool(
+    "pause",
+    {
+      description: "Pause or resume the game loop. When paused, all game logic, animations, and rendering stop but the DevBridge remains responsive for inspection. Use step() to advance frame-by-frame while paused.",
+      inputSchema: {
+        paused: z.boolean().optional().describe("True to pause, false to resume (default: true)"),
+      },
+    },
+    async ({ paused }) => {
+      const result = await bridge.call("pause", { paused });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "step",
+    {
+      description: "Advance the game by N frames while paused, then re-pause. Game must be paused first.",
+      inputSchema: {
+        frames: z.number().optional().describe("Number of frames to advance (default: 1, max: 100)"),
+      },
+    },
+    async ({ frames }) => {
+      const result = await bridge.call("step", { frames });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "quit",
+    { description: "Cleanly shut down the running game application" },
+    async () => {
+      const result = await bridge.call("quit");
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  // ======== v2: Trace & Error Capture ========
+
+  server.registerTool(
+    "get_traces",
+    {
+      description: "Get recent trace() output from the running application (ring buffer of last 200 lines)",
+      inputSchema: {
+        clear: z.boolean().optional().describe("Clear the trace buffer after reading (default: false)"),
+        limit: z.number().optional().describe("Max number of lines to return (default: 50)"),
+      },
+    },
+    async ({ clear, limit }) => {
+      const result = await bridge.call("get_traces", { clear, limit });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "get_errors",
+    {
+      description: "Get accumulated runtime errors/exceptions since last query",
+      inputSchema: {
+        clear: z.boolean().optional().describe("Clear the error buffer after reading (default: true)"),
+      },
+    },
+    async ({ clear }) => {
+      const result = await bridge.call("get_errors", { clear });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  // ======== v2: Deep Inspection ========
+
+  server.registerTool(
+    "get_parameters",
+    {
+      description: "Get current parameter values and definitions for a live programmable instance",
+      inputSchema: {
+        programmable: z.string().describe("Programmable name"),
+      },
+    },
+    async ({ programmable }) => {
+      const result = await bridge.call("get_parameters", { programmable });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "list_interactives",
+    {
+      description: "List all registered interactive hit-test regions on a screen with their IDs, positions, and metadata",
+      inputSchema: {
+        screen: z.string().describe("Screen name"),
+      },
+    },
+    async ({ screen }) => {
+      const result = await bridge.call("list_interactives", { screen });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "list_slots",
+    {
+      description: "List all slots (swappable containers) on a programmable with their occupied/empty status",
+      inputSchema: {
+        programmable: z.string().describe("Programmable name"),
+      },
+    },
+    async ({ programmable }) => {
+      const result = await bridge.call("list_slots", { programmable });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "get_tween_state",
+    { description: "Get all active tweens/animations with their targets, duration, elapsed time, and progress" },
+    async () => {
+      const result = await bridge.call("get_tween_state");
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "get_screen_state",
+    { description: "Get detailed screen manager state: mode, active screens, transition status, pause state, element/interactive counts" },
+    async () => {
+      const result = await bridge.call("get_screen_state");
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "find_element_at",
+    {
+      description: "Hit-test a screen position to find all scene graph objects at the given coordinates, sorted front-to-back by depth",
+      inputSchema: {
+        x: z.number().describe("X coordinate in scene space"),
+        y: z.number().describe("Y coordinate in scene space"),
+      },
+    },
+    async ({ x, y }) => {
+      const result = await bridge.call("find_element_at", { x, y });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "inspect_programmable",
+    {
+      description: "Deep inspection of a live programmable: current parameter values, slots, dynamic refs, named elements, interactives, and settings",
+      inputSchema: {
+        programmable: z.string().describe("Programmable name"),
+      },
+    },
+    async ({ programmable }) => {
+      const result = await bridge.call("inspect_programmable", { programmable });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 }
