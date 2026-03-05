@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hx-multianim-mcp": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "."
+    }
+  }
+}

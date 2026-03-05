@@ -147,7 +147,7 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
   server.registerTool(
     "eval_manim",
     {
-      description: "Parse a .manim source snippet and return the parsed node names (for validation/debugging)",
+      description: "Parse and validate a .manim source snippet. Returns parsed node names and any build errors (missing fonts, invalid tiles, type mismatches)",
       inputSchema: {
         source: z.string().describe("The .manim source code to parse"),
       },
@@ -290,7 +290,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
     {
       description: "List all registered interactive hit-test regions on a screen with their IDs, positions, and metadata",
       inputSchema: {
-        screen: z.string().describe("Screen name"),
+        screen: z.string().optional().describe("Screen name. If omitted, aggregates interactives from all active screens."),
       },
     },
     async ({ screen }) => {
@@ -338,10 +338,11 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       inputSchema: {
         x: z.number().describe("X coordinate in scene space"),
         y: z.number().describe("Y coordinate in scene space"),
+        relative_to: z.string().optional().describe("Element name for relative coordinates. If provided, x,y are in that element's local space"),
       },
     },
-    async ({ x, y }) => {
-      const result = await bridge.call("find_element_at", { x, y });
+    async ({ x, y, relative_to }) => {
+      const result = await bridge.call("find_element_at", { x, y, relative_to });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -356,6 +357,62 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
     },
     async ({ programmable }) => {
       const result = await bridge.call("inspect_programmable", { programmable });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  // ======== v3: Health, Resources, Coordinates, Idle ========
+
+  server.registerTool(
+    "ping",
+    { description: "Health check - returns uptime and port. Lightweight alternative to performance for connection testing." },
+    async () => {
+      const result = await bridge.call("ping");
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "list_fonts",
+    { description: "List all registered font names available for use in .manim files" },
+    async () => {
+      const result = await bridge.call("list_fonts");
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "list_atlases",
+    { description: "List all loaded sprite atlases with their tile/sprite names" },
+    async () => {
+      const result = await bridge.call("list_atlases");
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "coordinate_transform",
+    {
+      description: "Transform coordinates between local and global space relative to a named element. Use to_local to convert scene coords to element-local, to_global to convert element-local to scene coords.",
+      inputSchema: {
+        element: z.string().describe("Element name (h2d.Object.name)"),
+        x: z.number().describe("X coordinate"),
+        y: z.number().describe("Y coordinate"),
+        direction: z.enum(["to_local", "to_global"]).describe("Transform direction: to_local (scene→element) or to_global (element→scene)"),
+        screen: z.string().optional().describe("Screen name to scope element search (searches all if omitted)"),
+      },
+    },
+    async ({ element, x, y, direction, screen }) => {
+      const result = await bridge.call("coordinate_transform", { element, x, y, direction, screen });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.registerTool(
+    "wait_for_idle",
+    { description: "Check if the system is idle (no active tweens, no screen transitions). Returns current state without blocking." },
+    async () => {
+      const result = await bridge.call("wait_for_idle");
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );

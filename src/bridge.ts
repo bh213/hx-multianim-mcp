@@ -36,7 +36,7 @@ export class DevBridge {
 
   async isAlive(): Promise<boolean> {
     try {
-      await this.call("performance");
+      await this.call("ping");
       return true;
     } catch {
       return false;
