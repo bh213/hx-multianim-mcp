@@ -416,4 +416,26 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
+
+  // ======== v4: Layout Validation ========
+
+  server.registerTool(
+    "check_overlaps",
+    {
+      description: `Detect overlapping elements to find layout bugs and broken click targets.
+- Interactive overlaps (severity: high): two clickable regions overlap, causing unreliable clicks
+- Visual overlaps (severity: low): sibling elements with overlapping bounds (parent-child overlap is normal and ignored)
+Returns overlap pairs with their bounds, overlap rectangle, and overlap area in pixels.`,
+      inputSchema: {
+        screen: z.string().optional().describe("Screen name. If omitted, checks all active screens."),
+        mode: z.enum(["all", "interactives", "visual"]).optional().describe("What to check: 'interactives' for click regions only, 'visual' for sibling visual overlaps, 'all' for both (default: all)"),
+        min_overlap_area: z.number().optional().describe("Minimum overlap area in px² to report (default: 1). Use higher values to filter trivial edge-touching."),
+        include_hidden: z.boolean().optional().describe("Include non-visible/disabled elements (default: false)"),
+      },
+    },
+    async ({ screen, mode, min_overlap_area, include_hidden }) => {
+      const result = await bridge.call("check_overlaps", { screen, mode, min_overlap_area, include_hidden });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 }
