@@ -417,6 +417,23 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
     }
   );
 
+  // ======== v5: Direct Actions ========
+
+  server.registerTool(
+    "click_button",
+    {
+      description: `Directly click an interactive button by its ID, bypassing coordinate-based hit testing. Works even if the button is scrolled off-screen or obscured by other elements. Use list_interactives to discover available button IDs.`,
+      inputSchema: {
+        id: z.string().describe("Interactive identifier (as returned by list_interactives)"),
+        screen: z.string().optional().describe("Screen name to scope the search. If omitted, searches all active screens."),
+      },
+    },
+    async ({ id, screen }) => {
+      const result = await bridge.call("click_interactive", { id, screen });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
   // ======== v4: Layout Validation ========
 
   server.registerTool(
