@@ -190,7 +190,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         button: z.number().optional().describe("Mouse button: 0=left, 1=middle, 2=right"),
         keyCode: z.number().optional().describe("Keyboard key code (hxd.Key constants)"),
         charCode: z.number().optional().describe("Character code for text input"),
-        delta: z.number().optional().describe("Mouse wheel delta (positive=up)"),
+        delta: z.number().optional().describe("Mouse wheel delta (positive=scroll down)"),
       },
     },
     async (params) => {
