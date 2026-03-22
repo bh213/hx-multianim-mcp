@@ -434,6 +434,39 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
     }
   );
 
+  // ======== v6: Batch Events ========
+
+  server.registerTool(
+    "send_events",
+    {
+      description: `Send a sequence of input events with game frame steps between them. Enables multi-step interactions (drag-and-drop, slider scrub, card hand drag) in a single call.
+
+Each entry in the events array is either:
+- An event: {type, x, y, button, ...} (same params as send_event)
+- A frame step: {step: N} — advance N game frames (processes animations, state machines, zone detection)
+
+The game must be paused for frame steps to work. Use auto_pause:true to auto-pause before and resume after.
+
+Example drag: [
+  {type:"mouse_down", x:100, y:200},
+  {step:2},
+  {type:"move", x:200, y:150},
+  {step:1},
+  {type:"move", x:300, y:100},
+  {step:1},
+  {type:"mouse_up", x:300, y:100}
+]`,
+      inputSchema: {
+        events: z.array(z.record(z.string(), z.any())).describe("Array of event objects ({type,x,y,...}) and frame steps ({step:N})"),
+        auto_pause: z.boolean().optional().describe("Auto-pause before executing and resume after (default: false). Enables frame steps without manual pause/resume."),
+      },
+    },
+    async ({ events, auto_pause }) => {
+      const result = await bridge.call("send_events", { events, auto_pause });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
   // ======== v4: Layout Validation ========
 
   server.registerTool(
