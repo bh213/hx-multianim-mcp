@@ -467,6 +467,24 @@ Example drag: [
     }
   );
 
+  // ======== v7: Active Programmables ========
+
+  server.registerTool(
+    "list_active_programmables",
+    {
+      description: `List all live incremental-mode programmables currently in the scene. Returns current parameter values, parameter definitions (types), named elements, slots, interactive counts, position, and visibility for each. Only programmables built with incremental:true are tracked.`,
+      inputSchema: {
+        programmable: z.string().optional().describe("Filter by programmable name. If omitted, returns all active programmables."),
+        sceneGraph: z.boolean().optional().describe("Include scene graph subtree for each programmable (default: false)"),
+        depth: z.number().optional().describe("Scene graph depth when sceneGraph is true (default: 6)"),
+      },
+    },
+    async ({ programmable, sceneGraph, depth }) => {
+      const result = await bridge.call("list_active_programmables", { programmable, sceneGraph, depth });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
   // ======== v4: Layout Validation ========
 
   server.registerTool(
