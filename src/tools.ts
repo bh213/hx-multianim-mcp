@@ -1,11 +1,43 @@
 /**
  * MCP tool definitions for hx-multianim DevBridge.
  * Each tool maps to a DevBridge HTTP method.
+ *
+ * Error handling: DevBridgeError from bridge.call() is caught and returned
+ * as {isError: true} with structured JSON ({error, code}) so Claude can
+ * differentiate connection_failed / not_found / invalid_params / invalid_state / internal.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { DevBridge } from "./bridge.js";
+import { DevBridge, DevBridgeError } from "./bridge.js";
+
+type ToolContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: "image/png" };
+type ToolResult = { content: ToolContent[]; isError?: boolean };
+
+/** Return a structured tool error with code for programmatic differentiation. */
+function toolError(code: string, message: string): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify({ error: message, code }) }],
+    isError: true,
+  };
+}
+
+/** Call bridge method and return JSON result, or structured isError on failure. */
+async function callBridge(
+  bridge: DevBridge,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<ToolResult> {
+  try {
+    const result = await bridge.call(method, params);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  } catch (error) {
+    if (error instanceof DevBridgeError) {
+      return toolError(error.code, error.message);
+    }
+    throw error;
+  }
+}
 
 export function registerTools(server: McpServer, bridge: DevBridge): void {
   // ---- Performance & Status ----
@@ -13,10 +45,7 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
   server.registerTool(
     "performance",
     { description: "Get FPS, draw calls, triangle count, object count, and scene dimensions" },
-    async () => {
-      const result = await bridge.call("performance");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "performance"),
   );
 
   // ---- Scene Inspection ----
@@ -24,19 +53,13 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
   server.registerTool(
     "list_screens",
     { description: "List all registered screens with their active/failed status" },
-    async () => {
-      const result = await bridge.call("list_screens");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "list_screens"),
   );
 
   server.registerTool(
     "list_builders",
     { description: "List all loaded .manim builders with their programmable names and parameter definitions" },
-    async () => {
-      const result = await bridge.call("list_builders");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "list_builders"),
   );
 
   server.registerTool(
@@ -45,10 +68,7 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
       description: "Dump the scene graph tree showing object types, positions, visibility, and names",
       inputSchema: { depth: z.number().optional().describe("Maximum depth to traverse (default: 10)") },
     },
-    async ({ depth }) => {
-      const result = await bridge.call("scene_graph", { depth });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ depth }) => callBridge(bridge, "scene_graph", { depth }),
   );
 
   server.registerTool(
@@ -60,10 +80,7 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
         element: z.string().describe("Element name (h2d.Object.name)"),
       },
     },
-    async ({ screen, element }) => {
-      const result = await bridge.call("inspect_element", { screen, element });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ screen, element }) => callBridge(bridge, "inspect_element", { screen, element }),
   );
 
   // ---- Screenshot ----
@@ -78,18 +95,25 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
       },
     },
     async ({ width, height }) => {
-      const result = (await bridge.call("screenshot", { width, height })) as {
-        base64: string;
-        width: number;
-        height: number;
-      };
-      return {
-        content: [
-          { type: "image" as const, data: result.base64, mimeType: "image/png" as const },
-          { type: "text" as const, text: `Screenshot: ${result.width}x${result.height}` },
-        ],
-      };
-    }
+      try {
+        const result = (await bridge.call("screenshot", { width, height })) as {
+          base64: string;
+          width: number;
+          height: number;
+        };
+        return {
+          content: [
+            { type: "image" as const, data: result.base64, mimeType: "image/png" as const },
+            { type: "text" as const, text: `Screenshot: ${result.width}x${result.height}` },
+          ],
+        };
+      } catch (error) {
+        if (error instanceof DevBridgeError) {
+          return toolError(error.code, error.message);
+        }
+        throw error;
+      }
+    },
   );
 
   // ---- State Manipulation ----
@@ -104,10 +128,8 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
         value: z.union([z.string(), z.number(), z.boolean()]).describe("New value"),
       },
     },
-    async ({ programmable, param, value }) => {
-      const result = await bridge.call("set_parameter", { programmable, param, value });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ programmable, param, value }) =>
+      callBridge(bridge, "set_parameter", { programmable, param, value }),
   );
 
   server.registerTool(
@@ -120,10 +142,8 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
         visible: z.boolean().describe("Whether the element should be visible"),
       },
     },
-    async ({ screen, element, visible }) => {
-      const result = await bridge.call("set_visibility", { screen, element, visible });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ screen, element, visible }) =>
+      callBridge(bridge, "set_visibility", { screen, element, visible }),
   );
 
   // ---- Hot Reload ----
@@ -136,10 +156,7 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
         file: z.string().optional().describe("Resource path to reload (e.g. 'ui/menu.manim'). Omit to reload all changed files."),
       },
     },
-    async ({ file }) => {
-      const result = await bridge.call("reload", { file });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ file }) => callBridge(bridge, "reload", { file }),
   );
 
   // ---- Debugging ----
@@ -152,19 +169,13 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
         source: z.string().describe("The .manim source code to parse"),
       },
     },
-    async ({ source }) => {
-      const result = await bridge.call("eval_manim", { source });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ source }) => callBridge(bridge, "eval_manim", { source }),
   );
 
   server.registerTool(
     "list_resources",
     { description: "List all loaded resources: sprite sheets, fonts, .manim files, .anim files" },
-    async () => {
-      const result = await bridge.call("list_resources");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "list_resources"),
   );
 
   // ---- Event Injection ----
@@ -193,10 +204,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         delta: z.number().optional().describe("Mouse wheel delta (positive=scroll down)"),
       },
     },
-    async (params) => {
-      const result = await bridge.call("send_event", params);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async (params) => callBridge(bridge, "send_event", params),
   );
 
   // ======== v2: Game Control ========
@@ -209,10 +217,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         paused: z.boolean().optional().describe("True to pause, false to resume (default: true)"),
       },
     },
-    async ({ paused }) => {
-      const result = await bridge.call("pause", { paused });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ paused }) => callBridge(bridge, "pause", { paused }),
   );
 
   server.registerTool(
@@ -223,19 +228,13 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         frames: z.number().optional().describe("Number of frames to advance (default: 1, max: 100)"),
       },
     },
-    async ({ frames }) => {
-      const result = await bridge.call("step", { frames });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ frames }) => callBridge(bridge, "step", { frames }),
   );
 
   server.registerTool(
     "quit",
     { description: "Cleanly shut down the running game application" },
-    async () => {
-      const result = await bridge.call("quit");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "quit"),
   );
 
   // ======== v2: Trace & Error Capture ========
@@ -249,10 +248,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         limit: z.number().optional().describe("Max number of lines to return (default: 50)"),
       },
     },
-    async ({ clear, limit }) => {
-      const result = await bridge.call("get_traces", { clear, limit });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ clear, limit }) => callBridge(bridge, "get_traces", { clear, limit }),
   );
 
   server.registerTool(
@@ -263,10 +259,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         clear: z.boolean().optional().describe("Clear the error buffer after reading (default: true)"),
       },
     },
-    async ({ clear }) => {
-      const result = await bridge.call("get_errors", { clear });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ clear }) => callBridge(bridge, "get_errors", { clear }),
   );
 
   // ======== v2: Deep Inspection ========
@@ -279,10 +272,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         programmable: z.string().describe("Programmable name"),
       },
     },
-    async ({ programmable }) => {
-      const result = await bridge.call("get_parameters", { programmable });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ programmable }) => callBridge(bridge, "get_parameters", { programmable }),
   );
 
   server.registerTool(
@@ -293,10 +283,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         screen: z.string().optional().describe("Screen name. If omitted, aggregates interactives from all active screens."),
       },
     },
-    async ({ screen }) => {
-      const result = await bridge.call("list_interactives", { screen });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ screen }) => callBridge(bridge, "list_interactives", { screen }),
   );
 
   server.registerTool(
@@ -307,28 +294,19 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         programmable: z.string().describe("Programmable name"),
       },
     },
-    async ({ programmable }) => {
-      const result = await bridge.call("list_slots", { programmable });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ programmable }) => callBridge(bridge, "list_slots", { programmable }),
   );
 
   server.registerTool(
     "get_tween_state",
     { description: "Get all active tweens/animations with their targets, duration, elapsed time, and progress" },
-    async () => {
-      const result = await bridge.call("get_tween_state");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "get_tween_state"),
   );
 
   server.registerTool(
     "get_screen_state",
     { description: "Get detailed screen manager state: mode, active screens, transition status, pause state, element/interactive counts" },
-    async () => {
-      const result = await bridge.call("get_screen_state");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "get_screen_state"),
   );
 
   server.registerTool(
@@ -341,10 +319,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         relative_to: z.string().optional().describe("Element name for relative coordinates. If provided, x,y are in that element's local space"),
       },
     },
-    async ({ x, y, relative_to }) => {
-      const result = await bridge.call("find_element_at", { x, y, relative_to });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ x, y, relative_to }) => callBridge(bridge, "find_element_at", { x, y, relative_to }),
   );
 
   server.registerTool(
@@ -355,10 +330,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         programmable: z.string().describe("Programmable name"),
       },
     },
-    async ({ programmable }) => {
-      const result = await bridge.call("inspect_programmable", { programmable });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ programmable }) => callBridge(bridge, "inspect_programmable", { programmable }),
   );
 
   // ======== v3: Health, Resources, Coordinates, Idle ========
@@ -366,28 +338,19 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "ping",
     { description: "Health check - returns uptime and port. Lightweight alternative to performance for connection testing." },
-    async () => {
-      const result = await bridge.call("ping");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "ping"),
   );
 
   server.registerTool(
     "list_fonts",
     { description: "List all registered font names available for use in .manim files" },
-    async () => {
-      const result = await bridge.call("list_fonts");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "list_fonts"),
   );
 
   server.registerTool(
     "list_atlases",
     { description: "List all loaded sprite atlases with their tile/sprite names" },
-    async () => {
-      const result = await bridge.call("list_atlases");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "list_atlases"),
   );
 
   server.registerTool(
@@ -402,19 +365,14 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         screen: z.string().optional().describe("Screen name to scope element search (searches all if omitted)"),
       },
     },
-    async ({ element, x, y, direction, screen }) => {
-      const result = await bridge.call("coordinate_transform", { element, x, y, direction, screen });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ element, x, y, direction, screen }) =>
+      callBridge(bridge, "coordinate_transform", { element, x, y, direction, screen }),
   );
 
   server.registerTool(
     "wait_for_idle",
     { description: "Check if the system is idle (no active tweens, no screen transitions). Returns current state without blocking." },
-    async () => {
-      const result = await bridge.call("wait_for_idle");
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async () => callBridge(bridge, "wait_for_idle"),
   );
 
   // ======== v5: Direct Actions ========
@@ -428,10 +386,7 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         screen: z.string().optional().describe("Screen name to scope the search. If omitted, searches all active screens."),
       },
     },
-    async ({ id, screen }) => {
-      const result = await bridge.call("click_interactive", { id, screen });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ id, screen }) => callBridge(bridge, "click_interactive", { id, screen }),
   );
 
   // ======== v6: Batch Events ========
@@ -461,10 +416,7 @@ Example drag: [
         auto_pause: z.boolean().optional().describe("Auto-pause before executing and resume after (default: false). Enables frame steps without manual pause/resume."),
       },
     },
-    async ({ events, auto_pause }) => {
-      const result = await bridge.call("send_events", { events, auto_pause });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ events, auto_pause }) => callBridge(bridge, "send_events", { events, auto_pause }),
   );
 
   // ======== v7: Active Programmables ========
@@ -479,10 +431,8 @@ Example drag: [
         depth: z.number().optional().describe("Scene graph depth when sceneGraph is true (default: 6)"),
       },
     },
-    async ({ programmable, sceneGraph, depth }) => {
-      const result = await bridge.call("list_active_programmables", { programmable, sceneGraph, depth });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ programmable, sceneGraph, depth }) =>
+      callBridge(bridge, "list_active_programmables", { programmable, sceneGraph, depth }),
   );
 
   // ======== v4: Layout Validation ========
@@ -501,9 +451,7 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
         include_hidden: z.boolean().optional().describe("Include non-visible/disabled elements (default: false)"),
       },
     },
-    async ({ screen, mode, min_overlap_area, include_hidden }) => {
-      const result = await bridge.call("check_overlaps", { screen, mode, min_overlap_area, include_hidden });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ screen, mode, min_overlap_area, include_hidden }) =>
+      callBridge(bridge, "check_overlaps", { screen, mode, min_overlap_area, include_hidden }),
   );
 }
