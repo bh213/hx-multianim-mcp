@@ -31,11 +31,28 @@ export class DevBridgeError extends Error {
 export class DevBridge {
   private baseUrl: string;
   private port: number;
+  private host: string;
+  private _connected: boolean = false;
 
   constructor(host: string = "localhost", port: number = 9001) {
-    this.baseUrl = `http://${host}:${port}`;
+    this.host = host;
     this.port = port;
+    this.baseUrl = `http://${host}:${port}`;
   }
+
+  get connected(): boolean { return this._connected; }
+
+  /** Update the connection target. Returns the new base URL. */
+  reconnect(host: string, port: number): string {
+    this.host = host;
+    this.port = port;
+    this.baseUrl = `http://${host}:${port}`;
+    this._connected = true;
+    return this.baseUrl;
+  }
+
+  getHost(): string { return this.host; }
+  getPort(): number { return this.port; }
 
   async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     let response: Response;

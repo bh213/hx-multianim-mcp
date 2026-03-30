@@ -26,10 +26,10 @@ const server = new McpServer(
   { capabilities: { logging: {} } },
 );
 
-registerTools(server, bridge);
+const sse = new SseClient(host, port);
+registerTools(server, bridge, sse);
 
 // SSE: push game events as MCP log notifications
-const sse = new SseClient(host, port);
 sse.on("event", (evt: SseEvent) => {
   try {
     const payload = JSON.parse(evt.data) as Record<string, unknown>;
@@ -100,7 +100,6 @@ sse.on("event", (evt: SseEvent) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-sse.start();
 
 const cleanup = () => {
   sse.stop();

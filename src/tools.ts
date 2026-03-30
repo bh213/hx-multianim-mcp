@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import sharp from "sharp";
 import { z } from "zod";
 import { DevBridge, DevBridgeError } from "./bridge.js";
+import type { SseClient } from "./sse.js";
 
 type ToolContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: "image/png" };
 type ToolResult = { content: ToolContent[]; isError?: boolean };
@@ -29,6 +30,9 @@ async function callBridge(
   method: string,
   params?: Record<string, unknown>,
 ): Promise<ToolResult> {
+  if (!bridge.connected) {
+    return toolError("not_connected", "Not connected to a game instance. Call the 'connect' tool first with the appropriate port.");
+  }
   try {
     const result = await bridge.call(method, params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -46,7 +50,35 @@ async function scaleImage(png: Buffer, width: number, height: number): Promise<{
   return { data, width, height };
 }
 
-export function registerTools(server: McpServer, bridge: DevBridge): void {
+export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClient): void {
+  // ---- Connection ----
+
+  server.registerTool(
+    "connect",
+    {
+      description: "Connect to a game instance on a specific port (and optionally host). Sets up both DevBridge and SSE connections. Must be called before using any other tools. Default port is 9001, but the actual port should be obtained from the game's stdout output, e.g.: [DevBridge] Listening on port 9002",
+      inputSchema: {
+        port: z.number().describe("DevBridge port number"),
+        host: z.string().optional().describe("DevBridge host (default: localhost)"),
+      },
+    },
+    async ({ port, host }) => {
+      const targetHost = host ?? "localhost";
+      bridge.reconnect(targetHost, port);
+      sse.reconnect(targetHost, port);
+      // Verify connection with a ping
+      try {
+        const result = await bridge.call("ping");
+        return { content: [{ type: "text" as const, text: JSON.stringify({ connected: true, host: targetHost, port, ping: result }, null, 2) }] };
+      } catch (error) {
+        if (error instanceof DevBridgeError) {
+          return toolError(error.code, `Switched to ${targetHost}:${port} but ping failed: ${error.message}`);
+        }
+        throw error;
+      }
+    },
+  );
+
   // ---- Performance & Status ----
 
   server.registerTool(
@@ -102,6 +134,9 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
       },
     },
     async ({ width, height }) => {
+      if (!bridge.connected) {
+        return toolError("not_connected", "Not connected to a game instance. Call the 'connect' tool first with the appropriate port.");
+      }
       try {
         const result = (await bridge.call("screenshot")) as {
           base64: string;

@@ -27,6 +27,14 @@ export class SseClient extends EventEmitter {
     this.port = port;
   }
 
+  /** Reconnect to a new host/port. Stops current connection and restarts. */
+  reconnect(host: string, port: number): void {
+    this.stop();
+    this.host = host;
+    this.port = port;
+    this.start();
+  }
+
   start(): void {
     this.stopped = false;
     this.connect();
