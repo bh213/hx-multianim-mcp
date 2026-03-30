@@ -8,6 +8,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import sharp from "sharp";
 import { z } from "zod";
 import { DevBridge, DevBridgeError } from "./bridge.js";
 
@@ -37,6 +38,12 @@ async function callBridge(
     }
     throw error;
   }
+}
+
+/** Resize a PNG image buffer to the given dimensions. Returns resized PNG buffer and dimensions. */
+async function scaleImage(png: Buffer, width: number, height: number): Promise<{ data: Buffer; width: number; height: number }> {
+  const data = await sharp(png).resize(width, height).png().toBuffer();
+  return { data, width, height };
 }
 
 export function registerTools(server: McpServer, bridge: DevBridge): void {
@@ -88,23 +95,51 @@ export function registerTools(server: McpServer, bridge: DevBridge): void {
   server.registerTool(
     "screenshot",
     {
-      description: "Capture the current frame as a PNG image",
+      description: "Capture the current frame as a PNG image. Provide width and/or height to scale down (aspect ratio is preserved when only one is given; error if both are given with wrong aspect ratio).",
       inputSchema: {
-        width: z.number().optional().describe("Width in pixels (default: scene width)"),
-        height: z.number().optional().describe("Height in pixels (default: scene height)"),
+        width: z.number().optional().describe("Target width in pixels. If only width is provided, height is computed to preserve aspect ratio."),
+        height: z.number().optional().describe("Target height in pixels. If only height is provided, width is computed to preserve aspect ratio."),
       },
     },
     async ({ width, height }) => {
       try {
-        const result = (await bridge.call("screenshot", { width, height })) as {
+        const result = (await bridge.call("screenshot")) as {
           base64: string;
           width: number;
           height: number;
         };
+
+        let imageData = result.base64;
+        let finalWidth = result.width;
+        let finalHeight = result.height;
+
+        if (width !== undefined || height !== undefined) {
+          const srcW = result.width;
+          const srcH = result.height;
+          const aspect = srcW / srcH;
+
+          if (width !== undefined && height !== undefined) {
+            const expectedHeight = Math.round(width / aspect);
+            if (Math.abs(expectedHeight - height) > 1) {
+              return toolError("invalid_params", `Aspect ratio mismatch: ${srcW}x${srcH} image cannot be scaled to ${width}x${height}. For width=${width}, height should be ~${expectedHeight}. Provide only one dimension to auto-compute the other.`);
+            }
+          }
+
+          const targetW = width ?? Math.round(height! * aspect);
+          const targetH = height ?? Math.round(width! / aspect);
+
+          if (targetW < srcW || targetH < srcH) {
+            const resized = await scaleImage(Buffer.from(result.base64, "base64"), targetW, targetH);
+            imageData = resized.data.toString("base64");
+            finalWidth = resized.width;
+            finalHeight = resized.height;
+          }
+        }
+
         return {
           content: [
-            { type: "image" as const, data: result.base64, mimeType: "image/png" as const },
-            { type: "text" as const, text: `Screenshot: ${result.width}x${result.height}` },
+            { type: "image" as const, data: imageData, mimeType: "image/png" as const },
+            { type: "text" as const, text: `Screenshot: ${finalWidth}x${finalHeight}${(finalWidth !== result.width || finalHeight !== result.height) ? ` (scaled from ${result.width}x${result.height})` : ""}` },
           ],
         };
       } catch (error) {

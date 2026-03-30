@@ -1,6 +1,6 @@
 {
   "name": "@bh213/hx-multianim-mcp",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "MCP server for inspecting and manipulating running hx-multianim applications",
   "type": "module",
   "main": "dist/index.js",
@@ -30,10 +30,12 @@
   "license": "BSD-3-Clause",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "sharp": "^0.34.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/sharp": "^0.31.1",
     "typescript": "^5.7.0"
   }
 }
