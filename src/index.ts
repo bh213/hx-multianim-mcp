@@ -23,7 +23,13 @@ const bridge = new DevBridge(host, port);
 
 const server = new McpServer(
   { name: "hx-multianim-dev", version: "1.10.0" },
-  { capabilities: { logging: {} } },
+  {
+    capabilities: { logging: {} },
+    instructions:
+      "This server bridges Claude to a running hx-multianim (Haxe/Heaps) game via DevBridge.\n\n" +
+      "IMPORTANT — CONNECT FIRST: You MUST call the `connect` tool before any other tool. All other tools will return a `not_connected` error until `connect` succeeds. The game's DevBridge port is printed to stdout on startup (e.g. `[DevBridge] Listening on port 9002`); default is 9001.\n\n" +
+      "Breakpoints: game code can call `DevBridge.debugger(data, pause?)` (JS-debugger-style). Hits arrive as SSE `debugger` log notifications in real time AND via the pollable `get_debugger_hits` tool (use `since_id` as a cursor). If the hit paused the game, resume with `pause({paused:false})`.",
+  },
 );
 
 const sse = new SseClient(host, port);
@@ -74,6 +80,17 @@ sse.on("event", (evt: SseEvent) => {
           level: "debug",
           logger: "param",
           data: `${payload.programmable}.${payload.param} = ${JSON.stringify(payload.value)}`,
+        });
+        break;
+      }
+      case "debugger": {
+        const loc = payload.file ? `${payload.file as string}:${payload.line}` : "<unknown>";
+        const dataStr = typeof payload.data === "string" ? payload.data : JSON.stringify(payload.data);
+        const pausedStr = payload.paused ? " [PAUSED]" : "";
+        void server.sendLoggingMessage({
+          level: "warning",
+          logger: "debugger",
+          data: `#${payload.id} ${loc} ${payload.method as string}${pausedStr}\n${dataStr}`,
         });
         break;
       }

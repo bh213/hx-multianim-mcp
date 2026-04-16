@@ -332,6 +332,20 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
     async ({ clear }) => callBridge(bridge, "get_errors", { clear }),
   );
 
+  server.registerTool(
+    "get_debugger_hits",
+    {
+      description: "Poll recent hits from DevBridge.debugger(data, pause?) calls placed in the game (JS-debugger-style breakpoint). Each hit has {id, data, paused, file, line, method, timestamp}. Use since_id from a previous call as a cursor to get only new hits. Hits also arrive in real time as SSE 'debugger' events (shown as warning-level log notifications). If paused=true, the game is paused at the hit — resume with pause({paused:false}).",
+      inputSchema: {
+        clear: z.boolean().optional().describe("Clear the buffer after reading (default: false)"),
+        limit: z.number().optional().describe("Max hits to return (default: 50, max: 100)"),
+        since_id: z.number().optional().describe("Only return hits with id > since_id. Use the lastId from a previous response as a cursor."),
+      },
+    },
+    async ({ clear, limit, since_id }) =>
+      callBridge(bridge, "get_debugger_hits", { clear, limit, since_id }),
+  );
+
   // ======== v2: Deep Inspection ========
 
   server.registerTool(
