@@ -1,6 +1,6 @@
 {
   "name": "@bh213/hx-multianim-mcp",
-  "version": "1.14",
+  "version": "1.14.0",
   "description": "MCP server for inspecting and manipulating running hx-multianim applications",
   "type": "module",
   "main": "dist/index.js",
