@@ -221,7 +221,7 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
   server.registerTool(
     "reload",
     {
-      description: "Hot-reload a .manim file (or all files if no file specified)",
+      description: "Hot-reload a .manim file (or all files if no file specified). On failure, errors[] entries include 'message', 'file', 'line', 'col', 'errorType' ('parse' | 'build' | 'signatureIncompatible'), and 'context' — builder errors now carry accurate file/line/col instead of 0 placeholders.",
       inputSchema: {
         file: z.string().optional().describe("Resource path to reload (e.g. 'ui/menu.manim'). Omit to reload all changed files."),
       },
@@ -234,7 +234,7 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
   server.registerTool(
     "eval_manim",
     {
-      description: "Parse and validate a .manim source snippet. Returns parsed node names and any build errors (missing fonts, invalid tiles, type mismatches)",
+      description: "Parse and validate a .manim source snippet. Returns parsed node names and per-node buildErrors[]. Each build error has 'node' (programmable name or '<filters>') and 'error' (message); runtime builder failures additionally include 'file', 'line', 'col', and optional 'code' ('not_a_number', 'missing_ref', etc.) for clickable diagnostics.",
       inputSchema: {
         source: z.string().describe("The .manim source code to parse"),
       },
