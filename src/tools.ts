@@ -538,4 +538,41 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
     async ({ screen, mode, min_overlap_area, include_hidden }) =>
       callBridge(bridge, "check_overlaps", { screen, mode, min_overlap_area, include_hidden }),
   );
+
+  // ======== v8: Custom game ops (query / command / event) ========
+
+  server.registerTool(
+    "list_game_ops",
+    {
+      description: `List game-specific custom operations registered by the running game. Returns {queries, commands, events}, each entry has {op|name, description, params|payload} where params/payload is a schema-lite hint (e.g. {lane: "int", count: "int?"}). Call this first to discover what the current game exposes, then use game_op to invoke a query/command, or get_game_events to poll events.`,
+    },
+    async () => callBridge(bridge, "list_game_ops"),
+  );
+
+  server.registerTool(
+    "game_op",
+    {
+      description: `Invoke a game-specific custom query or command registered by the running game. Use list_game_ops to discover available ops and their param shapes. Returns {kind: "query"|"command", op, result}. Errors with code "not_found" for unknown ops, "internal" if the handler throws.`,
+      inputSchema: {
+        op: z.string().describe("Op identifier (from list_game_ops)"),
+        params: z.record(z.string(), z.any()).optional().describe("Handler-specific params object"),
+      },
+    },
+    async ({ op, params }) => callBridge(bridge, "game_op", { op, params }),
+  );
+
+  server.registerTool(
+    "get_game_events",
+    {
+      description: `Poll custom game events emitted via DevBridge.emitEvent(name, data) on the Haxe side. Events also arrive in real time as SSE "game_event" notifications. Mirrors the get_debugger_hits cursor pattern: use since_id from the previous response to fetch only new events.`,
+      inputSchema: {
+        types: z.array(z.string()).optional().describe("Filter by event names (e.g. [\"unit_died\", \"wave_completed\"]). Omit to return all types."),
+        since_id: z.number().optional().describe("Return only events with id > since_id. Use lastId from a previous response as a cursor."),
+        limit: z.number().optional().describe("Max events to return (default: 50, max: 200)"),
+        clear: z.boolean().optional().describe("Clear the buffer after reading (default: false)"),
+      },
+    },
+    async ({ types, since_id, limit, clear }) =>
+      callBridge(bridge, "get_game_events", { types, since_id, limit, clear }),
+  );
 }
