@@ -1,20 +1,30 @@
 /**
  * MCP tool definitions for hx-multianim DevBridge.
- * Each tool maps to a DevBridge HTTP method.
+ * Each tool maps to a DevBridge method, sent to one game (see instances.ts for which).
  *
- * Error handling: DevBridgeError from bridge.call() is caught and returned
+ * Error handling: DevBridgeError from a call is caught and returned
  * as {isError: true} with structured JSON ({error, code}) so Claude can
- * differentiate connection_failed / not_found / invalid_params / invalid_state / internal.
+ * differentiate not_connected / connection_failed / timeout / not_found / invalid_params / invalid_state / internal.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import sharp from "sharp";
+import { readFile } from "node:fs/promises";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { DevBridge, DevBridgeError } from "./bridge.js";
-import type { SseClient } from "./sse.js";
+import { DevBridgeError, HttpTransport } from "./bridge.js";
+import type { EventBuffer } from "./events.js";
+import type { Instance, InstanceRegistry } from "./instances.js";
 
 type ToolContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: "image/png" };
 type ToolResult = { content: ToolContent[]; isError?: boolean };
+
+export interface ToolContext {
+  registry: InstanceRegistry;
+  events: EventBuffer;
+  /** Host a HashLink game's DevBridge is on (HX_DEV_HOST). */
+  defaultHost: string;
+  token?: string;
+  timeoutMs?: number;
+}
 
 /** Return a structured tool error with code for programmatic differentiation. */
 function toolError(code: string, message: string): ToolResult {
@@ -24,90 +34,196 @@ function toolError(code: string, message: string): ToolResult {
   };
 }
 
-/** Call bridge method and return JSON result, or structured isError on failure. */
+function textResult(value: unknown): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+}
+
+function errorResult(error: unknown): ToolResult {
+  if (error instanceof DevBridgeError) return toolError(error.code, error.message);
+  throw error;
+}
+
+const target = z
+  .string()
+  .optional()
+  .describe(
+    'Which game to call: an id from list_instances ("http:9001", "web-1") or a HashLink port ("9002"). Optional when exactly one game is connected, or one was chosen with connect.',
+  );
+
+/** Resolve the target game and call a method on it, returning JSON or a structured isError. */
 async function callBridge(
-  bridge: DevBridge,
+  ctx: ToolContext,
   method: string,
-  params?: Record<string, unknown>,
+  params: Record<string, unknown> = {},
+  targetId?: string,
 ): Promise<ToolResult> {
-  if (!bridge.connected) {
-    return toolError("not_connected", "Not connected to a game instance. Call the 'connect' tool first with the appropriate port.");
-  }
   try {
-    const result = await bridge.call(method, params);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    const instance = await ctx.registry.resolve(targetId);
+    const result = await instance.transport.call(method, params);
+    return textResult(result);
   } catch (error) {
-    if (error instanceof DevBridgeError) {
-      return toolError(error.code, error.message);
-    }
-    throw error;
+    return errorResult(error);
   }
 }
 
-/** Resize a PNG image buffer to the given dimensions. Returns resized PNG buffer and dimensions. */
+/** Resize a PNG image buffer to the given dimensions. sharp is loaded only when a picture is scaled. */
 async function scaleImage(png: Buffer, width: number, height: number): Promise<{ data: Buffer; width: number; height: number }> {
+  const sharp = (await import("sharp")).default;
   const data = await sharp(png).resize(width, height).png().toBuffer();
   return { data, width, height };
 }
 
-export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClient): void {
+function describeInstance(instance: Instance, current: string | null): Record<string, unknown> {
+  return {
+    id: instance.id,
+    kind: instance.kind === "ws" ? "browser" : "hashlink",
+    current: instance.id === current,
+    connectedAt: instance.connectedAt.toISOString(),
+    ...instance.info,
+  };
+}
+
+export function registerTools(server: McpServer, ctx: ToolContext): void {
   // ---- Connection ----
 
   server.registerTool(
     "connect",
     {
-      description: "Connect to a game instance on a specific port (and optionally host). Sets up both DevBridge and SSE connections. Must be called before using any other tools. Default port is 9001, but the actual port should be obtained from the game's stdout output, e.g.: [DevBridge] Listening on port 9002",
+      description:
+        "Choose the game that tool calls go to when they name no target. For a HashLink game give its DevBridge port (and optionally host): it is pinged first, and nothing changes if the ping fails. For a game already known (see list_instances), such as a browser game connected to the relay, give its instance id. Not needed when exactly one game is connected: calls then go to it. The DevBridge port is printed to game stdout, e.g. [DevBridge] Listening on port 9002",
       inputSchema: {
-        port: z.number().describe("DevBridge port number"),
+        port: z.number().optional().describe("DevBridge port number of a HashLink game"),
         host: z.string().optional().describe("DevBridge host (default: localhost)"),
+        instance: z.string().optional().describe('An instance id from list_instances, e.g. "web-1" or "http:9001"'),
       },
     },
-    async ({ port, host }) => {
-      const targetHost = host ?? "localhost";
-      bridge.reconnect(targetHost, port);
-      sse.reconnect(targetHost, port);
-      // Verify connection with a ping
+    async ({ port, host, instance }) => {
+      const before = ctx.registry.current;
+      const unchanged = before ? ` Nothing changed: calls still go to ${before}.` : " Nothing changed.";
+      if (instance !== undefined) {
+        const known = ctx.registry.get(instance);
+        if (!known) {
+          const ids = ctx.registry.list().map((i) => i.id);
+          return toolError("unknown_target", `No game "${instance}". Known: ${ids.length > 0 ? ids.join(", ") : "none"}.${unchanged}`);
+        }
+        try {
+          const ping = await known.transport.call("ping");
+          ctx.registry.select(known.id);
+          return textResult({ connected: true, instance: known.id, ping });
+        } catch (error) {
+          if (error instanceof DevBridgeError) return toolError(error.code, `${known.id} did not answer a ping: ${error.message}.${unchanged}`);
+          throw error;
+        }
+      }
+      if (port === undefined) {
+        return toolError("invalid_params", "connect needs port (a HashLink game's DevBridge) or instance (from list_instances).");
+      }
+      const targetHost = host ?? ctx.defaultHost;
+      const probe = new HttpTransport(targetHost, port, { token: ctx.token, timeoutMs: ctx.timeoutMs });
+      let ping: unknown;
       try {
-        const result = await bridge.call("ping");
-        return { content: [{ type: "text" as const, text: JSON.stringify({ connected: true, host: targetHost, port, ping: result }, null, 2) }] };
+        ping = await probe.call("ping");
       } catch (error) {
         if (error instanceof DevBridgeError) {
-          return toolError(error.code, `Switched to ${targetHost}:${port} but ping failed: ${error.message}`);
+          return toolError(error.code, `Could not connect to ${targetHost}:${port}: ${error.message}.${unchanged}`);
         }
         throw error;
       }
+      const added = ctx.registry.addHttp(targetHost, port);
+      ctx.registry.select(added.id);
+      return textResult({ connected: true, instance: added.id, host: targetHost, port, ping });
     },
+  );
+
+  server.registerTool(
+    "list_instances",
+    {
+      description:
+        "List the games this server can reach: browser games connected to the relay (app, title, URL, session), HashLink games already connected, and DevBridges answering a ping on the ten ports from the default one (9001-9010). Says which one calls go to when they name no target.",
+      inputSchema: {
+        scan: z.boolean().optional().describe("Ping the ten default ports for HashLink games not yet connected (default: true)"),
+      },
+    },
+    async ({ scan }) => {
+      const current = ctx.registry.current;
+      const instances = ctx.registry.list().map((i) => describeInstance(i, current));
+      const discovered: Array<Record<string, unknown>> = [];
+      if (scan !== false) {
+        const base = ctx.registry.defaultPort();
+        const knownPorts = new Set(ctx.registry.list().filter((i) => i.kind === "http").map((i) => i.info.port));
+        const probes = [];
+        for (let port = base; port < base + 10; port++) {
+          if (knownPorts.has(port)) continue;
+          const probe = new HttpTransport(ctx.defaultHost, port, { token: ctx.token, timeoutMs: 700 });
+          probes.push(
+            probe.call("ping").then(
+              (ping) => discovered.push({ id: `http:${port}`, kind: "hashlink", port, connected: false, ping }),
+              (error) => {
+                if (error instanceof DevBridgeError && error.code === "unauthorized") {
+                  discovered.push({ id: `http:${port}`, kind: "hashlink", port, connected: false, error: "requires a token (HX_DEV_TOKEN)" });
+                }
+              },
+            ),
+          );
+        }
+        await Promise.all(probes);
+        discovered.sort((a, b) => (a.port as number) - (b.port as number));
+      }
+      const relay = ctx.registry.relay;
+      return textResult({
+        current,
+        relay: relay && relay.port > 0 ? { listening: relay.url, openPageWith: `?devbridge=${relay.url}` } : null,
+        instances,
+        discovered,
+      });
+    },
+  );
+
+  server.registerTool(
+    "events",
+    {
+      description:
+        "Read what the connected games pushed, oldest first, with a cursor: traces (trace), runtime errors (error), screen changes (screen_change), hot reloads with their errors (reload), parameter changes (parameter_change), breakpoint hits (debugger), game events (game_event), custom events (custom). Pass the lastId of the previous answer as since_id to get only what is new. This server keeps the last 1000 events of every game it is connected to, so nothing is lost between calls. 'missed' counts events that were pushed out before you read them.",
+      inputSchema: {
+        since_id: z.number().optional().describe("Only events with id > since_id (use lastId from the previous answer)"),
+        kinds: z.array(z.string()).optional().describe('Only these kinds, e.g. ["error", "reload", "debugger"]'),
+        limit: z.number().optional().describe("Max events to return (default: 100)"),
+        target: z.string().optional().describe("Only events from this game (an instance id)"),
+      },
+    },
+    async ({ since_id, kinds, limit, target: instance }) =>
+      textResult(ctx.events.query({ since_id, kinds, limit, instance })),
   );
 
   // ---- Performance & Status ----
 
   server.registerTool(
     "performance",
-    { description: "Get FPS, draw calls, triangle count, object count, and scene dimensions" },
-    async () => callBridge(bridge, "performance"),
+    { description: "Get FPS, draw calls, triangle count, object count, and scene dimensions", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "performance", {}, target),
   );
 
   // ---- Scene Inspection ----
 
   server.registerTool(
     "list_screens",
-    { description: "List all registered screens with their active/failed status" },
-    async () => callBridge(bridge, "list_screens"),
+    { description: "List all registered screens with their active/failed status", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "list_screens", {}, target),
   );
 
   server.registerTool(
     "list_builders",
-    { description: "List all loaded .manim builders with their programmable names and parameter definitions" },
-    async () => callBridge(bridge, "list_builders"),
+    { description: "List all loaded .manim builders with their programmable names and parameter definitions", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "list_builders", {}, target),
   );
 
   server.registerTool(
     "scene_graph",
     {
       description: "Dump the scene graph tree showing object types, positions, visibility, and names",
-      inputSchema: { depth: z.number().optional().describe("Maximum depth to traverse (default: 10)") },
+      inputSchema: { depth: z.number().optional().describe("Maximum depth to traverse (default: 10)"), target },
     },
-    async ({ depth }) => callBridge(bridge, "scene_graph", { depth }),
+    async ({ depth, target }) => callBridge(ctx, "scene_graph", { depth }, target),
   );
 
   server.registerTool(
@@ -117,9 +233,10 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
       inputSchema: {
         screen: z.string().describe("Screen name"),
         element: z.string().describe("Element name (h2d.Object.name)"),
+        target,
       },
     },
-    async ({ screen, element }) => callBridge(bridge, "inspect_element", { screen, element }),
+    async ({ screen, element, target }) => callBridge(ctx, "inspect_element", { screen, element }, target),
   );
 
   // ---- Screenshot ----
@@ -127,18 +244,18 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
   server.registerTool(
     "screenshot",
     {
-      description: "Capture the current frame as a PNG image. Provide width and/or height to scale down (aspect ratio is preserved when only one is given; error if both are given with wrong aspect ratio).",
+      description:
+        "Capture the current frame as a PNG image. Provide width and/or height to scale down (aspect ratio is preserved when only one is given; error if both are given with wrong aspect ratio). In a browser game the picture is the render target's size, whatever the page's device pixel ratio.",
       inputSchema: {
         width: z.number().optional().describe("Target width in pixels. If only width is provided, height is computed to preserve aspect ratio."),
         height: z.number().optional().describe("Target height in pixels. If only height is provided, width is computed to preserve aspect ratio."),
+        target,
       },
     },
-    async ({ width, height }) => {
-      if (!bridge.connected) {
-        return toolError("not_connected", "Not connected to a game instance. Call the 'connect' tool first with the appropriate port.");
-      }
+    async ({ width, height, target }) => {
       try {
-        const result = (await bridge.call("screenshot")) as {
+        const instance = await ctx.registry.resolve(target);
+        const result = (await instance.transport.call("screenshot")) as {
           base64: string;
           width: number;
           height: number;
@@ -178,10 +295,7 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
           ],
         };
       } catch (error) {
-        if (error instanceof DevBridgeError) {
-          return toolError(error.code, error.message);
-        }
-        throw error;
+        return errorResult(error);
       }
     },
   );
@@ -196,10 +310,11 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
         programmable: z.string().describe("Programmable name"),
         param: z.string().describe("Parameter name"),
         value: z.union([z.string(), z.number(), z.boolean()]).describe("New value"),
+        target,
       },
     },
-    async ({ programmable, param, value }) =>
-      callBridge(bridge, "set_parameter", { programmable, param, value }),
+    async ({ programmable, param, value, target }) =>
+      callBridge(ctx, "set_parameter", { programmable, param, value }, target),
   );
 
   server.registerTool(
@@ -210,10 +325,11 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
         screen: z.string().describe("Screen name"),
         element: z.string().describe("Element name"),
         visible: z.boolean().describe("Whether the element should be visible"),
+        target,
       },
     },
-    async ({ screen, element, visible }) =>
-      callBridge(bridge, "set_visibility", { screen, element, visible }),
+    async ({ screen, element, visible, target }) =>
+      callBridge(ctx, "set_visibility", { screen, element, visible }, target),
   );
 
   // ---- Hot Reload ----
@@ -221,12 +337,26 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
   server.registerTool(
     "reload",
     {
-      description: "Hot-reload a .manim file (or all files if no file specified). On failure, errors[] entries include 'message', 'file', 'line', 'col', 'errorType' ('parse' | 'build' | 'signatureIncompatible'), and 'context' — builder errors now carry accurate file/line/col instead of 0 placeholders.",
+      description:
+        "Hot-reload a .manim file (or all changed files if no file specified). A HashLink game reads the file itself. A browser game cannot: give it the text, as content or as source_path (a file on this machine that this server reads and sends). On failure, errors[] entries include 'message', 'file', 'line', 'col', 'errorType' ('parse' | 'build' | 'signatureIncompatible'), and 'context'.",
       inputSchema: {
-        file: z.string().optional().describe("Resource path to reload (e.g. 'ui/menu.manim'). Omit to reload all changed files."),
+        file: z.string().optional().describe("Resource path to reload (e.g. 'ui/menu.manim'). Omit to reload all changed files (HashLink only)."),
+        content: z.string().optional().describe("The file's new text. Required for a browser game unless source_path is given."),
+        source_path: z.string().optional().describe("A path on this machine to read the file's text from, sent as content."),
+        target,
       },
     },
-    async ({ file }) => callBridge(bridge, "reload", { file }),
+    async ({ file, content, source_path, target }) => {
+      let text = content;
+      if (text === undefined && source_path !== undefined) {
+        try {
+          text = await readFile(source_path, "utf8");
+        } catch (error) {
+          return toolError("not_found", `Could not read source_path ${source_path}: ${(error as Error).message}`);
+        }
+      }
+      return callBridge(ctx, "reload", { file, content: text }, target);
+    },
   );
 
   // ---- Debugging ----
@@ -237,15 +367,16 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
       description: "Parse and validate a .manim source snippet. Returns parsed node names and per-node buildErrors[]. Each build error has 'node' (programmable name or '<filters>') and 'error' (message); runtime builder failures additionally include 'file', 'line', 'col', and optional 'code' ('not_a_number', 'missing_ref', etc.) for clickable diagnostics.",
       inputSchema: {
         source: z.string().describe("The .manim source code to parse"),
+        target,
       },
     },
-    async ({ source }) => callBridge(bridge, "eval_manim", { source }),
+    async ({ source, target }) => callBridge(ctx, "eval_manim", { source }, target),
   );
 
   server.registerTool(
     "list_resources",
-    { description: "List all loaded resources: sprite sheets, fonts, .manim files, .anim files" },
-    async () => callBridge(bridge, "list_resources"),
+    { description: "List all loaded resources: sprite sheets, fonts, .manim files, .anim files", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "list_resources", {}, target),
   );
 
   // ---- Event Injection ----
@@ -262,6 +393,8 @@ export function registerTools(server: McpServer, bridge: DevBridge, sse: SseClie
 - text: text input with charCode
 - wheel: mouse wheel with delta at x,y
 
+A key down and up inside one frame is not seen by code that polls hxd.Key each frame: use send_events with a {step:1} between key_down and key_up.
+
 Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=40, LEFT=37, RIGHT=39, F1=112`,
       inputSchema: {
         type: z.enum(["click", "mouse_down", "mouse_up", "move", "key_down", "key_up", "key_press", "text", "wheel"])
@@ -272,9 +405,10 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         keyCode: z.number().optional().describe("Keyboard key code (hxd.Key constants)"),
         charCode: z.number().optional().describe("Character code for text input"),
         delta: z.number().optional().describe("Mouse wheel delta (positive=scroll down)"),
+        target,
       },
     },
-    async (params) => callBridge(bridge, "send_event", params),
+    async ({ target, ...params }) => callBridge(ctx, "send_event", params, target),
   );
 
   // ======== v2: Game Control ========
@@ -282,12 +416,13 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "pause",
     {
-      description: "Pause or resume the game loop. When paused, all game logic, animations, and rendering stop but the DevBridge remains responsive for inspection. Use step() to advance frame-by-frame while paused.",
+      description: "Pause or resume the game loop. When paused, all game logic, animations, and rendering stop but the DevBridge remains responsive for inspection. Use step() to advance frame-by-frame while paused. A browser game's tab must be visible: a hidden tab stops its frames.",
       inputSchema: {
         paused: z.boolean().optional().describe("True to pause, false to resume (default: true)"),
+        target,
       },
     },
-    async ({ paused }) => callBridge(bridge, "pause", { paused }),
+    async ({ paused, target }) => callBridge(ctx, "pause", { paused }, target),
   );
 
   server.registerTool(
@@ -296,15 +431,16 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       description: "Advance the game by N frames while paused, then re-pause. Game must be paused first.",
       inputSchema: {
         frames: z.number().optional().describe("Number of frames to advance (default: 1, max: 100)"),
+        target,
       },
     },
-    async ({ frames }) => callBridge(bridge, "step", { frames }),
+    async ({ frames, target }) => callBridge(ctx, "step", { frames }, target),
   );
 
   server.registerTool(
     "quit",
-    { description: "Cleanly shut down the running game application" },
-    async () => callBridge(bridge, "quit"),
+    { description: "Cleanly shut down the running game application (HashLink only: a browser page answers not_supported)", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "quit", {}, target),
   );
 
   // ======== v2: Trace & Error Capture ========
@@ -316,34 +452,37 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       inputSchema: {
         clear: z.boolean().optional().describe("Clear the trace buffer after reading (default: false)"),
         limit: z.number().optional().describe("Max number of lines to return (default: 50)"),
+        target,
       },
     },
-    async ({ clear, limit }) => callBridge(bridge, "get_traces", { clear, limit }),
+    async ({ clear, limit, target }) => callBridge(ctx, "get_traces", { clear, limit }, target),
   );
 
   server.registerTool(
     "get_errors",
     {
-      description: "Get accumulated runtime errors/exceptions since last query",
+      description: "Get accumulated runtime errors/exceptions since last query. In a browser game, errors the page itself reports (uncaught exceptions, failed promises, a lost WebGL context, a resource that failed to load) are included, prefixed [browser].",
       inputSchema: {
         clear: z.boolean().optional().describe("Clear the error buffer after reading (default: true)"),
+        target,
       },
     },
-    async ({ clear }) => callBridge(bridge, "get_errors", { clear }),
+    async ({ clear, target }) => callBridge(ctx, "get_errors", { clear }, target),
   );
 
   server.registerTool(
     "get_debugger_hits",
     {
-      description: "Poll recent hits from DevBridge.debugger(data, pause?) calls placed in the game (JS-debugger-style breakpoint). Each hit has {id, data, paused, file, line, method, timestamp}. Use since_id from a previous call as a cursor to get only new hits. Hits also arrive in real time as SSE 'debugger' events (shown as warning-level log notifications). If paused=true, the game is paused at the hit — resume with pause({paused:false}).",
+      description: "Poll recent hits from DevBridge.debugger(data, pause?) calls placed in the game (JS-debugger-style breakpoint). Each hit has {id, data, paused, file, line, method, timestamp}. Use since_id from a previous call as a cursor to get only new hits. Hits also appear in the events tool (kind 'debugger'). If paused=true, the game is paused at the hit — resume with pause({paused:false}).",
       inputSchema: {
         clear: z.boolean().optional().describe("Clear the buffer after reading (default: false)"),
         limit: z.number().optional().describe("Max hits to return (default: 50, max: 100)"),
         since_id: z.number().optional().describe("Only return hits with id > since_id. Use the lastId from a previous response as a cursor."),
+        target,
       },
     },
-    async ({ clear, limit, since_id }) =>
-      callBridge(bridge, "get_debugger_hits", { clear, limit, since_id }),
+    async ({ clear, limit, since_id, target }) =>
+      callBridge(ctx, "get_debugger_hits", { clear, limit, since_id }, target),
   );
 
   // ======== v2: Deep Inspection ========
@@ -354,9 +493,10 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       description: "Get current parameter values and definitions for a live programmable instance",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
+        target,
       },
     },
-    async ({ programmable }) => callBridge(bridge, "get_parameters", { programmable }),
+    async ({ programmable, target }) => callBridge(ctx, "get_parameters", { programmable }, target),
   );
 
   server.registerTool(
@@ -365,9 +505,10 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       description: "List all registered interactive hit-test regions on a screen with their IDs, positions, and metadata",
       inputSchema: {
         screen: z.string().optional().describe("Screen name. If omitted, aggregates interactives from all active screens."),
+        target,
       },
     },
-    async ({ screen }) => callBridge(bridge, "list_interactives", { screen }),
+    async ({ screen, target }) => callBridge(ctx, "list_interactives", { screen }, target),
   );
 
   server.registerTool(
@@ -376,21 +517,22 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       description: "List all slots (swappable containers) on a programmable with their occupied/empty status",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
+        target,
       },
     },
-    async ({ programmable }) => callBridge(bridge, "list_slots", { programmable }),
+    async ({ programmable, target }) => callBridge(ctx, "list_slots", { programmable }, target),
   );
 
   server.registerTool(
     "get_tween_state",
-    { description: "Get all active tweens/animations with their targets, duration, elapsed time, and progress" },
-    async () => callBridge(bridge, "get_tween_state"),
+    { description: "Get all active tweens/animations with their targets, duration, elapsed time, and progress", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "get_tween_state", {}, target),
   );
 
   server.registerTool(
     "get_screen_state",
-    { description: "Get detailed screen manager state: mode, active screens, transition status, pause state, element/interactive counts" },
-    async () => callBridge(bridge, "get_screen_state"),
+    { description: "Get detailed screen manager state: mode, active screens, transition status, pause state, element/interactive counts", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "get_screen_state", {}, target),
   );
 
   server.registerTool(
@@ -401,9 +543,10 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         x: z.number().describe("X coordinate in scene space"),
         y: z.number().describe("Y coordinate in scene space"),
         relative_to: z.string().optional().describe("Element name for relative coordinates. If provided, x,y are in that element's local space"),
+        target,
       },
     },
-    async ({ x, y, relative_to }) => callBridge(bridge, "find_element_at", { x, y, relative_to }),
+    async ({ x, y, relative_to, target }) => callBridge(ctx, "find_element_at", { x, y, relative_to }, target),
   );
 
   server.registerTool(
@@ -412,29 +555,30 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       description: "Deep inspection of a live programmable: current parameter values, slots, dynamic refs, named elements, interactives, and settings",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
+        target,
       },
     },
-    async ({ programmable }) => callBridge(bridge, "inspect_programmable", { programmable }),
+    async ({ programmable, target }) => callBridge(ctx, "inspect_programmable", { programmable }, target),
   );
 
   // ======== v3: Health, Resources, Coordinates, Idle ========
 
   server.registerTool(
     "ping",
-    { description: "Health check - returns uptime and port. Lightweight alternative to performance for connection testing." },
-    async () => callBridge(bridge, "ping"),
+    { description: "Health check - returns uptime and port. Lightweight alternative to performance for connection testing.", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "ping", {}, target),
   );
 
   server.registerTool(
     "list_fonts",
-    { description: "List all registered font names available for use in .manim files" },
-    async () => callBridge(bridge, "list_fonts"),
+    { description: "List all registered font names available for use in .manim files", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "list_fonts", {}, target),
   );
 
   server.registerTool(
     "list_atlases",
-    { description: "List all loaded sprite atlases with their tile/sprite names" },
-    async () => callBridge(bridge, "list_atlases"),
+    { description: "List all loaded sprite atlases with their tile/sprite names", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "list_atlases", {}, target),
   );
 
   server.registerTool(
@@ -447,16 +591,17 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
         y: z.number().describe("Y coordinate"),
         direction: z.enum(["to_local", "to_global"]).describe("Transform direction: to_local (scene→element) or to_global (element→scene)"),
         screen: z.string().optional().describe("Screen name to scope element search (searches all if omitted)"),
+        target,
       },
     },
-    async ({ element, x, y, direction, screen }) =>
-      callBridge(bridge, "coordinate_transform", { element, x, y, direction, screen }),
+    async ({ element, x, y, direction, screen, target }) =>
+      callBridge(ctx, "coordinate_transform", { element, x, y, direction, screen }, target),
   );
 
   server.registerTool(
     "wait_for_idle",
-    { description: "Check if the system is idle (no active tweens, no screen transitions). Returns current state without blocking." },
-    async () => callBridge(bridge, "wait_for_idle"),
+    { description: "Check if the system is idle (no active tweens, no screen transitions). Returns current state without blocking.", inputSchema: { target } },
+    async ({ target }) => callBridge(ctx, "wait_for_idle", {}, target),
   );
 
   // ======== v5: Direct Actions ========
@@ -468,9 +613,10 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
       inputSchema: {
         id: z.string().describe("Interactive identifier (as returned by list_interactives)"),
         screen: z.string().optional().describe("Screen name to scope the search. If omitted, searches all active screens."),
+        target,
       },
     },
-    async ({ id, screen }) => callBridge(bridge, "click_interactive", { id, screen }),
+    async ({ id, screen, target }) => callBridge(ctx, "click_interactive", { id, screen }, target),
   );
 
   // ======== v6: Batch Events ========
@@ -485,6 +631,7 @@ Each entry in the events array is either:
 - A frame step: {step: N} — advance N game frames (processes animations, state machines, zone detection)
 
 The game must be paused for frame steps to work. Use auto_pause:true to auto-pause before and resume after.
+A key must be held for at least a frame to be seen by code that polls keys: put {step:1} between key_down and key_up.
 
 Example drag: [
   {type:"mouse_down", x:100, y:200},
@@ -498,9 +645,10 @@ Example drag: [
       inputSchema: {
         events: z.array(z.record(z.string(), z.any())).describe("Array of event objects ({type,x,y,...}) and frame steps ({step:N})"),
         auto_pause: z.boolean().optional().describe("Auto-pause before executing and resume after (default: false). Enables frame steps without manual pause/resume."),
+        target,
       },
     },
-    async ({ events, auto_pause }) => callBridge(bridge, "send_events", { events, auto_pause }),
+    async ({ events, auto_pause, target }) => callBridge(ctx, "send_events", { events, auto_pause }, target),
   );
 
   // ======== v7: Active Programmables ========
@@ -513,10 +661,11 @@ Example drag: [
         programmable: z.string().optional().describe("Filter by programmable name. If omitted, returns all active programmables."),
         sceneGraph: z.boolean().optional().describe("Include scene graph subtree for each programmable (default: false)"),
         depth: z.number().optional().describe("Scene graph depth when sceneGraph is true (default: 6)"),
+        target,
       },
     },
-    async ({ programmable, sceneGraph, depth }) =>
-      callBridge(bridge, "list_active_programmables", { programmable, sceneGraph, depth }),
+    async ({ programmable, sceneGraph, depth, target }) =>
+      callBridge(ctx, "list_active_programmables", { programmable, sceneGraph, depth }, target),
   );
 
   // ======== v4: Layout Validation ========
@@ -533,10 +682,11 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
         mode: z.enum(["all", "interactives", "visual"]).optional().describe("What to check: 'interactives' for click regions only, 'visual' for sibling visual overlaps, 'all' for both (default: all)"),
         min_overlap_area: z.number().optional().describe("Minimum overlap area in px² to report (default: 1). Use higher values to filter trivial edge-touching."),
         include_hidden: z.boolean().optional().describe("Include non-visible/disabled elements (default: false)"),
+        target,
       },
     },
-    async ({ screen, mode, min_overlap_area, include_hidden }) =>
-      callBridge(bridge, "check_overlaps", { screen, mode, min_overlap_area, include_hidden }),
+    async ({ screen, mode, min_overlap_area, include_hidden, target }) =>
+      callBridge(ctx, "check_overlaps", { screen, mode, min_overlap_area, include_hidden }, target),
   );
 
   // ======== v8: Custom game ops (query / command / event) ========
@@ -545,8 +695,9 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
     "list_game_ops",
     {
       description: `List game-specific custom operations registered by the running game. Returns {queries, commands, events}, each entry has {op|name, description, params|payload} where params/payload is a schema-lite hint (e.g. {lane: "int", count: "int?"}). Call this first to discover what the current game exposes, then use game_op to invoke a query/command, or get_game_events to poll events.`,
+      inputSchema: { target },
     },
-    async () => callBridge(bridge, "list_game_ops"),
+    async ({ target }) => callBridge(ctx, "list_game_ops", {}, target),
   );
 
   server.registerTool(
@@ -556,23 +707,25 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
       inputSchema: {
         op: z.string().describe("Op identifier (from list_game_ops)"),
         params: z.record(z.string(), z.any()).optional().describe("Handler-specific params object"),
+        target,
       },
     },
-    async ({ op, params }) => callBridge(bridge, "game_op", { op, params }),
+    async ({ op, params, target }) => callBridge(ctx, "game_op", { op, params }, target),
   );
 
   server.registerTool(
     "get_game_events",
     {
-      description: `Poll custom game events emitted via DevBridge.emitEvent(name, data) on the Haxe side. Events also arrive in real time as SSE "game_event" notifications. Mirrors the get_debugger_hits cursor pattern: use since_id from the previous response to fetch only new events.`,
+      description: `Poll custom game events emitted via DevBridge.emitEvent(name, data) on the Haxe side. They also appear in the events tool (kind "game_event"). Mirrors the get_debugger_hits cursor pattern: use since_id from the previous response to fetch only new events.`,
       inputSchema: {
         types: z.array(z.string()).optional().describe("Filter by event names (e.g. [\"unit_died\", \"wave_completed\"]). Omit to return all types."),
         since_id: z.number().optional().describe("Return only events with id > since_id. Use lastId from a previous response as a cursor."),
         limit: z.number().optional().describe("Max events to return (default: 50, max: 200)"),
         clear: z.boolean().optional().describe("Clear the buffer after reading (default: false)"),
+        target,
       },
     },
-    async ({ types, since_id, limit, clear }) =>
-      callBridge(bridge, "get_game_events", { types, since_id, limit, clear }),
+    async ({ types, since_id, limit, clear, target }) =>
+      callBridge(ctx, "get_game_events", { types, since_id, limit, clear }, target),
   );
 }

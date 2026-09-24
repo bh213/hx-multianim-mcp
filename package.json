@@ -1,6 +1,6 @@
 {
   "name": "@bh213/hx-multianim-mcp",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "description": "MCP server for inspecting and manipulating running hx-multianim applications",
   "type": "module",
   "main": "dist/index.js",
@@ -13,7 +13,8 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "keywords": [
     "mcp",
@@ -31,11 +32,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "sharp": "^0.34.5",
+    "ws": "^8.21.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/sharp": "^0.31.1",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.7.0"
   }
 }

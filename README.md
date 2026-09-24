@@ -2,14 +2,17 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that connects Claude (or any MCP client) to a running [hx-multianim](https://github.com/bh213/hx-multianim) application via its DevBridge.
 
-> **Call `connect` first.** All other tools return a `not_connected` error until `connect` succeeds. The DevBridge port is printed to game stdout as `[DevBridge] Listening on port N` (default 9001).
+It reaches a game on HashLink over the DevBridge's HTTP server, and a game in a browser page over a WebSocket relay the page dials into (`--listen`). Same tools, same answers.
+
+> **Which game.** With exactly one game connected, every tool goes to it; `connect` is not needed. With none, the first call looks for a HashLink game on the default port (the port in `HX_DEV_READY_FILE`, else `HX_DEV_PORT`, else 9001). With several, pass `target` (an id from `list_instances`, e.g. `"http:9001"` or `"web-1"`, or a bare port) or choose one with `connect`. A HashLink game prints its port on startup: `[DevBridge] Listening on port N`.
 
 ## Tools
 
 ### Connection & health
 | Tool          | Description                                                                   |
 |---------------|-------------------------------------------------------------------------------|
-| `connect`     | Connect to a game instance on a specific port/host. **Must be called first.** |
+| `connect`     | Choose the game calls go to: `{port, host?}` for a HashLink game (pinged first; nothing changes if it fails) or `{instance}` for a known one |
+| `list_instances` | Browser games on the relay (app, title, URL, session), HashLink games connected, and DevBridges answering on the ten default ports |
 | `ping`        | Lightweight health check — uptime and port                                    |
 | `performance` | FPS, draw calls, triangle count, object count, scene dimensions               |
 
@@ -68,6 +71,9 @@ An [MCP](https://modelcontextprotocol.io/) server that connects Claude (or any M
 | `get_traces`        | Recent `trace()` output (ring buffer)                                  |
 | `get_errors`        | Accumulated runtime errors/exceptions                                  |
 | `get_debugger_hits` | Poll `DevBridge.debugger(data, pause?)` breakpoint hits (cursor-based) |
+| `events`            | Everything the connected games pushed (traces, errors, reloads, screen changes, breakpoints, game events), from a buffer this server keeps (last 1000), with a cursor (`since_id`) and `kinds` filter |
+
+Every tool that talks to a game takes an optional `target`.
 
 ## Breakpoints from game code
 
@@ -78,9 +84,10 @@ screenManager.devBridge.debugger({hp: unit.hp, target: unit.target?.name});     
 screenManager.devBridge.debugger({fps: hxd.Timer.fps()}, false);                 // push-only, no pause
 ```
 
-Hits are delivered two ways:
-- **Push** — real-time `debugger` SSE events surfaced as warning-level MCP log notifications.
-- **Poll** — `get_debugger_hits` tool with `since_id` cursor (in case the agent missed the push).
+Hits are delivered three ways:
+- **`events`** — kind `debugger`, with every other event, from this server's buffer (the reliable one: clients do not always put log notifications in the model's context).
+- **Poll** — `get_debugger_hits` tool with `since_id` cursor.
+- **Push** — warning-level MCP log notifications.
 
 If `pause=true`, resume with `pause({paused:false})`.
 
@@ -100,12 +107,49 @@ If `pause=true`, resume with `pause({paused:false})`.
 }
 ```
 
+### A game in a browser: relay mode
+
+A page cannot listen on a port, so the roles swap: this server listens and the game dials in.
+
+```json
+{
+  "mcpServers": {
+    "hx-multianim": {
+      "command": "node",
+      "args": ["../hx-multianim-mcp/dist/index.js", "--listen"]
+    }
+  }
+}
+```
+
+`--listen` (or `--listen=9011`, or `HX_DEV_WS_PORT`) listens on `ws://127.0.0.1:9010`, trying the next nine ports when busy. Open the game built with `-D MULTIANIM_DEV` with `?devbridge=ws://127.0.0.1:9010` (add `&token=...` when a token is set). It appears in `list_instances` as `web-1` (the id stays while the page keeps its session, so a page that dials back after a restart is the same game). HashLink games work alongside it. In a browser game `reload` needs the file's text (`content`, or `source_path` for this server to read) and `quit` answers `not_supported`; its tab must be visible (a hidden tab stops its frames).
+
+Wire protocol (one JSON object per message): the game sends `{"kind":"hello","protocol":1,"session",...}`, this server answers `{"kind":"welcome","instance":"web-1"}`, then sends `{"kind":"call","id","method","params"}` and gets `{"kind":"result","id","ok",...}`; the game pushes `{"kind":"event","seq","event","data"}`. See hx-multianim's `docs/devbridge.md`.
+
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HX_DEV_PORT` | `9001` | DevBridge port |
-| `HX_DEV_HOST` | `localhost` | DevBridge host |
+| `HX_DEV_PORT` | `9001` | HashLink DevBridge port tried when nothing is connected |
+| `HX_DEV_HOST` | `localhost` | HashLink DevBridge host |
+| `HX_DEV_READY_FILE` | — | A game writes `{port}` here once listening; read in preference to `HX_DEV_PORT` |
+| `HX_DEV_TOKEN` | — | Sent to every game (`X-HX-Dev-Token`), and required in every browser game's `hello` (refused with close code 4401 otherwise). Set the same token for the game |
+| `HX_DEV_TIMEOUT_MS` | `10000` | A call with no answer by then fails with code `timeout` |
+| `HX_DEV_WS_PORT` | — | Relay mode on this port (same as `--listen`) |
+| `HX_DEV_WS_HOST` | `127.0.0.1` | Relay bind address |
+
+### Error codes
+
+Tool errors come back as `{error, code}` with `isError`: `not_connected`, `ambiguous_target`, `unknown_target`, `connection_failed`, `timeout`, `bad_reply`, `unauthorized`, and the DevBridge's own (`not_found`, `invalid_params`, `invalid_state`, `not_supported`, `unknown_method`, `internal`).
+
+## Development
+
+```bash
+npm run build
+npm test                    # node:test against fake games: HTTP + SSE and browser games over the relay
+node scripts/smoke.mjs      # end to end: runs dist/ over stdio in relay mode and drives whatever
+                            # games it finds (open a browser game with ?devbridge=ws://127.0.0.1:9010)
+```
 
 ## License
 
