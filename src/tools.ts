@@ -728,4 +728,64 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
     async ({ types, since_id, limit, clear, target }) =>
       callBridge(ctx, "get_game_events", { types, since_id, limit, clear }, target),
   );
+
+  // ======== The game's data: tables, picks and trees (hx-multianim's DataRegistry) ========
+
+  server.registerTool(
+    "list_data",
+    {
+      description: `The game's data: every table, pick and tree it has, loaded from a .manim data block or built in the game's own code and registered with DataRegistry.registerTable. Returns [{name, kind, rows, key, source, says?}] by name, kind "table", "tree" (a table whose rows name each other, such as an upgrade tree) or "pick" (how a table is drawn from: {over, by, chance, draws, repeats, otherwise?} instead of rows and key). source says where it is, to open it: {manim, block, line} for a data block, {code, className, method, line} for a table built in code. Then get_data for one in full, roll_pick to draw from a pick.`,
+      inputSchema: { target },
+    },
+    async ({ target }) => callData(ctx, "data_list", {}, target),
+  );
+
+  server.registerTool(
+    "get_data",
+    {
+      description: `One table, pick or tree of the game's data in full, by its name from list_data (cards.all, AllCards). A table: {name, kind, key, source, says?, columns, rows, rowMeta?, tree?}; columns are {id, type (int, float, string, bool, enum, record, ref), optional?, many?, key?, whole?, options? (an enum's values), to? (the enum, the record, or the record a ref names), columns? (a record's own), unit?, meta? (the column's annotations, such as range)}; rows are plain objects, an enum's value and a ref's id as words, a record inside a row by its own columns; rowMeta is each row's annotations by id (@by(claude) is {by: "claude"}); a tree adds {tree: {by, edges: [{from, to}]}}. A pick: {over, by, chance, draws, repeats, otherwise?, source, odds: [{id, share, chance}], nothing}, its odds exact. Errors with code "not_found" for a name the game does not have.`,
+      inputSchema: {
+        name: z.string().describe("The name from list_data: cards.all, cards.reward, AllCards"),
+        target,
+      },
+    },
+    async ({ name, target }) => callData(ctx, "data_get", { name }, target),
+  );
+
+  server.registerTool(
+    "roll_pick",
+    {
+      description: `Draw from one of the game's picks with the game's own picker and a seed: the rows the game draws from the same seed with new DataRandom(seed). The random is Mulberry32, so a tool with the usual JavaScript mulberry32 gets the same numbers from the same seed. Returns {name, seed, draws, picked: [ids]}. Draw many times with different seeds to see a pick's spread; get_data gives its exact odds.`,
+      inputSchema: {
+        name: z.string().describe("A pick's name from list_data (kind \"pick\"): cards.reward"),
+        seed: z.number().int().optional().describe("The seed (default: 1)"),
+        n: z.number().int().min(1).optional().describe("How many rows to draw (default: the pick's own draws)"),
+        target,
+      },
+    },
+    async ({ name, seed, n, target }) => callData(ctx, "data_pick", { name, seed, n }, target),
+  );
+}
+
+/**
+ * A call for the game's data. A game built on an hx-multianim that predates its data tables has no
+ * such method, and is told so in words rather than as an unknown method.
+ */
+async function callData(
+  ctx: ToolContext,
+  method: string,
+  params: Record<string, unknown>,
+  targetId?: string,
+): Promise<ToolResult> {
+  try {
+    const instance = await ctx.registry.resolve(targetId);
+    return textResult(await instance.transport.call(method, params));
+  } catch (error) {
+    if (error instanceof DevBridgeError && error.code === "unknown_method")
+      return toolError(
+        "not_supported",
+        `This game's DevBridge has no ${method}: its hx-multianim predates data tables (bh.multianim.data.DataRegistry). Update hx-multianim and build the game again.`,
+      );
+    return errorResult(error);
+  }
 }

@@ -73,6 +73,24 @@ It reaches a game on HashLink over the DevBridge's HTTP server, and a game in a 
 | `get_debugger_hits` | Poll `DevBridge.debugger(data, pause?)` breakpoint hits (cursor-based) |
 | `events`            | Everything the connected games pushed (traces, errors, reloads, screen changes, breakpoints, game events), from a buffer this server keeps (last 1000), with a cursor (`since_id`) and `kinds` filter |
 
+### Game ops
+| Tool              | Description                                                                  |
+|-------------------|------------------------------------------------------------------------------|
+| `list_game_ops`   | The queries, commands and events the game registered, and the library's own queries (`builtIn`) |
+| `game_op`         | Call one of them by name                                                      |
+| `get_game_events` | Poll the events the game emitted (cursor-based)                              |
+
+### Game data
+Tables, picks and trees: what the game loaded from `.manim` data blocks, and the tables its own code registers with `DataRegistry.registerTable` (hx-multianim's `bh.multianim.data`).
+
+| Tool         | Description                                                                                  |
+|--------------|----------------------------------------------------------------------------------------------|
+| `list_data`  | Every table, pick and tree: its kind, rows, and where it is (`.manim` file, block and line, or the code that builds it) |
+| `get_data`   | One in full: a table's columns and rows (a tree's edges too), a pick's exact odds            |
+| `roll_pick`  | Draw from a pick with the game's own picker and a seed: the rows the game draws from that seed |
+
+A game built on an hx-multianim without data tables answers these with `not_supported`.
+
 Every tool that talks to a game takes an optional `target`.
 
 ## Breakpoints from game code
