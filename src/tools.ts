@@ -7,7 +7,8 @@
  * differentiate not_connected / connection_failed / timeout / not_found / invalid_params / invalid_state / internal.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { extname } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DevBridgeError, HttpTransport } from "./bridge.js";
@@ -43,6 +44,27 @@ function errorResult(error: unknown): ToolResult {
   throw error;
 }
 
+/**
+ * Tool annotations (MCP ToolAnnotations). Every tool talks to the developer's own game, built with
+ * -D MULTIANIM_DEV, on this machine or a host the developer named: nothing here reaches the open
+ * world, so openWorldHint is false throughout.
+ */
+const NO_WORLD = { openWorldHint: false } as const;
+/** Reads the game and changes nothing. */
+const READ = { ...NO_WORLD, readOnlyHint: true, destructiveHint: false, idempotentHint: true } as const;
+/** Reads a buffer the game keeps, and empties it when asked (clear). */
+const DRAIN = { ...NO_WORLD, readOnlyHint: false, destructiveHint: false, idempotentHint: false } as const;
+/** Sets a value in the game; setting it again does nothing more. */
+const SET = { ...NO_WORLD, readOnlyHint: false, destructiveHint: false, idempotentHint: true } as const;
+/** Acts on the game (input, frames); every call acts again. */
+const ACT = { ...NO_WORLD, readOnlyHint: false, destructiveHint: false, idempotentHint: false } as const;
+/** Chooses which game this server talks to: state of this server, not of a game. */
+const SELECT = { ...NO_WORLD, readOnlyHint: false, destructiveHint: false, idempotentHint: true } as const;
+/** Runs a handler the game registered: a command does whatever that handler does. */
+const GAME_OP = { ...NO_WORLD, readOnlyHint: false, destructiveHint: true, idempotentHint: false } as const;
+/** Shuts the game down. */
+const QUIT = { ...NO_WORLD, readOnlyHint: false, destructiveHint: true, idempotentHint: true } as const;
+
 const target = z
   .string()
   .optional()
@@ -64,6 +86,22 @@ async function callBridge(
   } catch (error) {
     return errorResult(error);
   }
+}
+
+/** The files reload may read for a browser game: the hot-reloadable kinds, and nothing else on this machine. */
+const RELOADABLE_EXTENSIONS = new Set([".manim", ".anim"]);
+
+/** Why source_path may not be read, as a tool error; null when it may. */
+async function refuseSourcePath(sourcePath: string): Promise<ToolResult | null> {
+  if (!RELOADABLE_EXTENSIONS.has(extname(sourcePath).toLowerCase())) {
+    return toolError("invalid_params", `source_path must be a .manim or .anim file, not ${sourcePath}: reload reads no other file.`);
+  }
+  try {
+    if (!(await stat(sourcePath)).isFile()) return toolError("invalid_params", `source_path ${sourcePath} is not a file.`);
+  } catch (error) {
+    return toolError("not_found", `Could not read source_path ${sourcePath}: ${(error as Error).message}`);
+  }
+  return null;
 }
 
 /** Resize a PNG image buffer to the given dimensions. sharp is loaded only when a picture is scaled. */
@@ -89,6 +127,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "connect",
     {
+      title: "Connect to a game",
+      annotations: SELECT,
       description:
         "Choose the game that tool calls go to when they name no target. For a HashLink game give its DevBridge port (and optionally host): it is pinged first, and nothing changes if the ping fails. For a game already known (see list_instances), such as a browser game connected to the relay, give its instance id. Not needed when exactly one game is connected: calls then go to it. The DevBridge port is printed to game stdout, e.g. [DevBridge] Listening on port 9002",
       inputSchema: {
@@ -138,6 +178,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "list_instances",
     {
+      title: "List games",
+      annotations: READ,
       description:
         "List the games this server can reach: browser games connected to the relay (app, title, URL, session), HashLink games already connected, and DevBridges answering a ping on the ten ports from the default one (9001-9010). Says which one calls go to when they name no target.",
       inputSchema: {
@@ -182,6 +224,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "events",
     {
+      title: "Pushed events",
+      annotations: READ,
       description:
         "Read what the connected games pushed, oldest first, with a cursor: traces (trace), runtime errors (error), screen changes (screen_change), hot reloads with their errors (reload), parameter changes (parameter_change), breakpoint hits (debugger), game events (game_event), custom events (custom). Pass the lastId of the previous answer as since_id to get only what is new. This server keeps the last 1000 events of every game it is connected to, so nothing is lost between calls. 'missed' counts events that were pushed out before you read them.",
       inputSchema: {
@@ -199,7 +243,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   server.registerTool(
     "performance",
-    { description: "Get FPS, draw calls, triangle count, object count, and scene dimensions", inputSchema: { target } },
+    {
+      title: "Performance",
+      annotations: READ,
+      description: "Get FPS, draw calls, triangle count, object count, and scene dimensions",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "performance", {}, target),
   );
 
@@ -207,19 +256,31 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   server.registerTool(
     "list_screens",
-    { description: "List all registered screens with their active/failed status", inputSchema: { target } },
+    {
+      title: "List screens",
+      annotations: READ,
+      description: "List all registered screens with their active/failed status",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "list_screens", {}, target),
   );
 
   server.registerTool(
     "list_builders",
-    { description: "List all loaded .manim builders with their programmable names and parameter definitions", inputSchema: { target } },
+    {
+      title: "List builders",
+      annotations: READ,
+      description: "List all loaded .manim builders with their programmable names and parameter definitions",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "list_builders", {}, target),
   );
 
   server.registerTool(
     "scene_graph",
     {
+      title: "Scene graph",
+      annotations: READ,
       description: "Dump the scene graph tree showing object types, positions, visibility, and names",
       inputSchema: { depth: z.number().optional().describe("Maximum depth to traverse (default: 10)"), target },
     },
@@ -229,6 +290,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "inspect_element",
     {
+      title: "Inspect element",
+      annotations: READ,
       description: "Get detailed info about a named element on a screen (position, size, visibility, text content)",
       inputSchema: {
         screen: z.string().describe("Screen name"),
@@ -244,6 +307,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "screenshot",
     {
+      title: "Screenshot",
+      annotations: READ,
       description:
         "Capture the current frame as a PNG image. Provide width and/or height to scale down (aspect ratio is preserved when only one is given; error if both are given with wrong aspect ratio). In a browser game the picture is the render target's size, whatever the page's device pixel ratio.",
       inputSchema: {
@@ -305,6 +370,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "set_parameter",
     {
+      title: "Set parameter",
+      annotations: SET,
       description: "Set a parameter on a live programmable BuilderResult (uses incremental mode)",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
@@ -320,6 +387,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "set_visibility",
     {
+      title: "Set visibility",
+      annotations: SET,
       description: "Toggle visibility of a named element on a screen",
       inputSchema: {
         screen: z.string().describe("Screen name"),
@@ -337,18 +406,22 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "reload",
     {
+      title: "Hot reload",
+      annotations: SET,
       description:
-        "Hot-reload a .manim file (or all changed files if no file specified). A HashLink game reads the file itself. A browser game cannot: give it the text, as content or as source_path (a file on this machine that this server reads and sends). On failure, errors[] entries include 'message', 'file', 'line', 'col', 'errorType' ('parse' | 'build' | 'signatureIncompatible'), and 'context'.",
+        "Hot-reload a .manim or .anim file (or all changed files if no file specified). A HashLink game reads the file itself. A browser game cannot: give it the text, as content or as source_path (a .manim or .anim file on this machine that this server reads and sends to the game; no other file is read). On failure, errors[] entries include 'message', 'file', 'line', 'col', 'errorType' ('parse' | 'build' | 'signatureIncompatible'), and 'context'.",
       inputSchema: {
         file: z.string().optional().describe("Resource path to reload (e.g. 'ui/menu.manim'). Omit to reload all changed files (HashLink only)."),
         content: z.string().optional().describe("The file's new text. Required for a browser game unless source_path is given."),
-        source_path: z.string().optional().describe("A path on this machine to read the file's text from, sent as content."),
+        source_path: z.string().optional().describe("A .manim or .anim file on this machine to read the text from, sent as content. Any other path is refused."),
         target,
       },
     },
     async ({ file, content, source_path, target }) => {
       let text = content;
       if (text === undefined && source_path !== undefined) {
+        const refused = await refuseSourcePath(source_path);
+        if (refused) return refused;
         try {
           text = await readFile(source_path, "utf8");
         } catch (error) {
@@ -364,6 +437,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "eval_manim",
     {
+      title: "Validate .manim source",
+      annotations: READ,
       description: "Parse and validate a .manim source snippet. Returns parsed node names and per-node buildErrors[]. Each build error has 'node' (programmable name or '<filters>') and 'error' (message); runtime builder failures additionally include 'file', 'line', 'col', and optional 'code' ('not_a_number', 'missing_ref', etc.) for clickable diagnostics.",
       inputSchema: {
         source: z.string().describe("The .manim source code to parse"),
@@ -375,7 +450,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   server.registerTool(
     "list_resources",
-    { description: "List all loaded resources: sprite sheets, fonts, .manim files, .anim files", inputSchema: { target } },
+    {
+      title: "List resources",
+      annotations: READ,
+      description: "List all loaded resources: sprite sheets, fonts, .manim files, .anim files",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "list_resources", {}, target),
   );
 
@@ -384,6 +464,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "send_event",
     {
+      title: "Send input event",
+      annotations: ACT,
       description: `Inject an input event into the running application. Event types:
 - click: mouse click (push + release) at x,y with button (0=left, 1=middle, 2=right)
 - mouse_down / mouse_up: separate push/release at x,y
@@ -416,6 +498,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "pause",
     {
+      title: "Pause or resume",
+      annotations: SET,
       description: "Pause or resume the game loop. When paused, all game logic, animations, and rendering stop but the DevBridge remains responsive for inspection. Use step() to advance frame-by-frame while paused. A browser game's tab must be visible: a hidden tab stops its frames.",
       inputSchema: {
         paused: z.boolean().optional().describe("True to pause, false to resume (default: true)"),
@@ -428,6 +512,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "step",
     {
+      title: "Step frames",
+      annotations: ACT,
       description: "Advance the game by N frames while paused, then re-pause. Game must be paused first.",
       inputSchema: {
         frames: z.number().optional().describe("Number of frames to advance (default: 1, max: 100)"),
@@ -439,7 +525,12 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
 
   server.registerTool(
     "quit",
-    { description: "Cleanly shut down the running game application (HashLink only: a browser page answers not_supported)", inputSchema: { target } },
+    {
+      title: "Quit game",
+      annotations: QUIT,
+      description: "Cleanly shut down the running game application (HashLink only: a browser page answers not_supported)",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "quit", {}, target),
   );
 
@@ -448,6 +539,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "get_traces",
     {
+      title: "Traces",
+      annotations: DRAIN,
       description: "Get recent trace() output from the running application (ring buffer of last 200 lines)",
       inputSchema: {
         clear: z.boolean().optional().describe("Clear the trace buffer after reading (default: false)"),
@@ -461,6 +554,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "get_errors",
     {
+      title: "Runtime errors",
+      annotations: DRAIN,
       description: "Get accumulated runtime errors/exceptions since last query. In a browser game, errors the page itself reports (uncaught exceptions, failed promises, a lost WebGL context, a resource that failed to load) are included, prefixed [browser].",
       inputSchema: {
         clear: z.boolean().optional().describe("Clear the error buffer after reading (default: true)"),
@@ -473,6 +568,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "get_debugger_hits",
     {
+      title: "Breakpoint hits",
+      annotations: DRAIN,
       description: "Poll recent hits from DevBridge.debugger(data, pause?) calls placed in the game (JS-debugger-style breakpoint). Each hit has {id, data, paused, file, line, method, timestamp}. Use since_id from a previous call as a cursor to get only new hits. Hits also appear in the events tool (kind 'debugger'). If paused=true, the game is paused at the hit — resume with pause({paused:false}).",
       inputSchema: {
         clear: z.boolean().optional().describe("Clear the buffer after reading (default: false)"),
@@ -490,6 +587,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "get_parameters",
     {
+      title: "Parameters",
+      annotations: READ,
       description: "Get current parameter values and definitions for a live programmable instance",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
@@ -502,6 +601,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "list_interactives",
     {
+      title: "List interactives",
+      annotations: READ,
       description: "List all registered interactive hit-test regions on a screen with their IDs, positions, and metadata",
       inputSchema: {
         screen: z.string().optional().describe("Screen name. If omitted, aggregates interactives from all active screens."),
@@ -514,6 +615,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "list_slots",
     {
+      title: "List slots",
+      annotations: READ,
       description: "List all slots (swappable containers) on a programmable with their occupied/empty status",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
@@ -525,19 +628,31 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
 
   server.registerTool(
     "get_tween_state",
-    { description: "Get all active tweens/animations with their targets, duration, elapsed time, and progress", inputSchema: { target } },
+    {
+      title: "Tween state",
+      annotations: READ,
+      description: "Get all active tweens/animations with their targets, duration, elapsed time, and progress",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "get_tween_state", {}, target),
   );
 
   server.registerTool(
     "get_screen_state",
-    { description: "Get detailed screen manager state: mode, active screens, transition status, pause state, element/interactive counts", inputSchema: { target } },
+    {
+      title: "Screen state",
+      annotations: READ,
+      description: "Get detailed screen manager state: mode, active screens, transition status, pause state, element/interactive counts",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "get_screen_state", {}, target),
   );
 
   server.registerTool(
     "find_element_at",
     {
+      title: "Find element at point",
+      annotations: READ,
       description: "Hit-test a screen position to find all scene graph objects at the given coordinates, sorted front-to-back by depth",
       inputSchema: {
         x: z.number().describe("X coordinate in scene space"),
@@ -552,6 +667,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "inspect_programmable",
     {
+      title: "Inspect programmable",
+      annotations: READ,
       description: "Deep inspection of a live programmable: current parameter values, slots, dynamic refs, named elements, interactives, and settings",
       inputSchema: {
         programmable: z.string().describe("Programmable name"),
@@ -565,25 +682,42 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
 
   server.registerTool(
     "ping",
-    { description: "Health check - returns uptime and port. Lightweight alternative to performance for connection testing.", inputSchema: { target } },
+    {
+      title: "Ping",
+      annotations: READ,
+      description: "Health check - returns uptime and port. Lightweight alternative to performance for connection testing.",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "ping", {}, target),
   );
 
   server.registerTool(
     "list_fonts",
-    { description: "List all registered font names available for use in .manim files", inputSchema: { target } },
+    {
+      title: "List fonts",
+      annotations: READ,
+      description: "List all registered font names available for use in .manim files",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "list_fonts", {}, target),
   );
 
   server.registerTool(
     "list_atlases",
-    { description: "List all loaded sprite atlases with their tile/sprite names", inputSchema: { target } },
+    {
+      title: "List atlases",
+      annotations: READ,
+      description: "List all loaded sprite atlases with their tile/sprite names",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "list_atlases", {}, target),
   );
 
   server.registerTool(
     "coordinate_transform",
     {
+      title: "Transform coordinates",
+      annotations: READ,
       description: "Transform coordinates between local and global space relative to a named element. Use to_local to convert scene coords to element-local, to_global to convert element-local to scene coords.",
       inputSchema: {
         element: z.string().describe("Element name (h2d.Object.name)"),
@@ -600,7 +734,12 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
 
   server.registerTool(
     "wait_for_idle",
-    { description: "Check if the system is idle (no active tweens, no screen transitions). Returns current state without blocking.", inputSchema: { target } },
+    {
+      title: "Idle check",
+      annotations: READ,
+      description: "Check if the system is idle (no active tweens, no screen transitions). Returns current state without blocking.",
+      inputSchema: { target },
+    },
     async ({ target }) => callBridge(ctx, "wait_for_idle", {}, target),
   );
 
@@ -609,6 +748,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "click_button",
     {
+      title: "Click interactive",
+      annotations: ACT,
       description: `Directly click an interactive button by its ID, bypassing coordinate-based hit testing. Works even if the button is scrolled off-screen or obscured by other elements. Use list_interactives to discover available button IDs.`,
       inputSchema: {
         id: z.string().describe("Interactive identifier (as returned by list_interactives)"),
@@ -624,6 +765,8 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   server.registerTool(
     "send_events",
     {
+      title: "Send input sequence",
+      annotations: ACT,
       description: `Send a sequence of input events with game frame steps between them. Enables multi-step interactions (drag-and-drop, slider scrub, card hand drag) in a single call.
 
 Each entry in the events array is either:
@@ -656,6 +799,8 @@ Example drag: [
   server.registerTool(
     "list_active_programmables",
     {
+      title: "List active programmables",
+      annotations: READ,
       description: `List all live incremental-mode programmables currently in the scene. Returns current parameter values, parameter definitions (types), named elements, slots, interactive counts, position, and visibility for each. Only programmables built with incremental:true are tracked.`,
       inputSchema: {
         programmable: z.string().optional().describe("Filter by programmable name. If omitted, returns all active programmables."),
@@ -673,6 +818,8 @@ Example drag: [
   server.registerTool(
     "check_overlaps",
     {
+      title: "Check overlaps",
+      annotations: READ,
       description: `Detect overlapping elements to find layout bugs and broken click targets.
 - Interactive overlaps (severity: high): two clickable regions overlap, causing unreliable clicks
 - Visual overlaps (severity: low): sibling elements with overlapping bounds (parent-child overlap is normal and ignored)
@@ -694,6 +841,8 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
   server.registerTool(
     "list_game_ops",
     {
+      title: "List game ops",
+      annotations: READ,
       description: `List game-specific custom operations registered by the running game. Returns {queries, commands, events}, each entry has {op|name, description, params|payload} where params/payload is a schema-lite hint (e.g. {lane: "int", count: "int?"}). Call this first to discover what the current game exposes, then use game_op to invoke a query/command, or get_game_events to poll events.`,
       inputSchema: { target },
     },
@@ -703,7 +852,9 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
   server.registerTool(
     "game_op",
     {
-      description: `Invoke a game-specific custom query or command registered by the running game. Use list_game_ops to discover available ops and their param shapes. Returns {kind: "query"|"command", op, result}. Errors with code "not_found" for unknown ops, "internal" if the handler throws.`,
+      title: "Run game op",
+      annotations: GAME_OP,
+      description: `Invoke a game-specific custom query or command registered by the running game. A query reads; a command runs the handler the game registered for it, and does whatever that handler does. Use list_game_ops to discover available ops and their param shapes. Returns {kind: "query"|"command", op, result}. Errors with code "not_found" for unknown ops, "internal" if the handler throws.`,
       inputSchema: {
         op: z.string().describe("Op identifier (from list_game_ops)"),
         params: z.record(z.string(), z.any()).optional().describe("Handler-specific params object"),
@@ -716,6 +867,8 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
   server.registerTool(
     "get_game_events",
     {
+      title: "Game events",
+      annotations: DRAIN,
       description: `Poll custom game events emitted via DevBridge.emitEvent(name, data) on the Haxe side. They also appear in the events tool (kind "game_event"). Mirrors the get_debugger_hits cursor pattern: use since_id from the previous response to fetch only new events.`,
       inputSchema: {
         types: z.array(z.string()).optional().describe("Filter by event names (e.g. [\"unit_died\", \"wave_completed\"]). Omit to return all types."),
@@ -734,6 +887,8 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
   server.registerTool(
     "list_data",
     {
+      title: "List game data",
+      annotations: READ,
       description: `The game's data: every table, pick and tree it has, loaded from a .manim data block or built in the game's own code and registered with DataRegistry.registerTable. Returns [{name, kind, rows, key, source, says?}] by name, kind "table", "tree" (a table whose rows name each other, such as an upgrade tree) or "pick" (how a table is drawn from: {over, by, chance, draws, repeats, otherwise?} instead of rows and key). source says where it is, to open it: {manim, block, line} for a data block, {code, className, method, line} for a table built in code. Then get_data for one in full, roll_pick to draw from a pick.`,
       inputSchema: { target },
     },
@@ -743,6 +898,8 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
   server.registerTool(
     "get_data",
     {
+      title: "Get game data",
+      annotations: READ,
       description: `One table, pick or tree of the game's data in full, by its name from list_data (cards.all, AllCards). A table: {name, kind, key, source, says?, columns, rows, rowMeta?, tree?}; columns are {id, type (int, float, string, bool, enum, record, ref), optional?, many?, key?, whole?, options? (an enum's values), to? (the enum, the record, or the record a ref names), columns? (a record's own), unit?, meta? (the column's annotations, such as range)}; rows are plain objects, an enum's value and a ref's id as words, a record inside a row by its own columns; rowMeta is each row's annotations by id (@by(claude) is {by: "claude"}); a tree adds {tree: {by, edges: [{from, to}]}}. A pick: {over, by, chance, draws, repeats, otherwise?, source, odds: [{id, share, chance}], nothing}, its odds exact. Errors with code "not_found" for a name the game does not have.`,
       inputSchema: {
         name: z.string().describe("The name from list_data: cards.all, cards.reward, AllCards"),
@@ -755,6 +912,8 @@ Returns overlap pairs with their bounds, overlap rectangle, and overlap area in 
   server.registerTool(
     "roll_pick",
     {
+      title: "Roll a pick",
+      annotations: READ,
       description: `Draw from one of the game's picks with the game's own picker and a seed: the rows the game draws from the same seed with new DataRandom(seed). The random is Mulberry32, so a tool with the usual JavaScript mulberry32 gets the same numbers from the same seed. Returns {name, seed, draws, picked: [ids]}. Draw many times with different seeds to see a pick's spread; get_data gives its exact odds.`,
       inputSchema: {
         name: z.string().describe("A pick's name from list_data (kind \"pick\"): cards.reward"),

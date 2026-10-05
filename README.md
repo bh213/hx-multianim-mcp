@@ -47,7 +47,7 @@ It reaches a game on HashLink over the DevBridge's HTTP server, and a game in a 
 | `set_parameter`  | Modify a programmable parameter at runtime (incremental mode) |
 | `get_parameters` | Current parameter values and definitions for a programmable   |
 | `set_visibility` | Toggle element visibility                                     |
-| `reload`         | Hot-reload `.manim` files (specific file or all changed)      |
+| `reload`         | Hot-reload `.manim`/`.anim` files (specific file or all changed) |
 | `eval_manim`     | Parse and validate `.manim` snippets                          |
 
 ### Game control
@@ -159,6 +159,17 @@ Wire protocol (one JSON object per message): the game sends `{"kind":"hello","pr
 ### Error codes
 
 Tool errors come back as `{error, code}` with `isError`: `not_connected`, `ambiguous_target`, `unknown_target`, `connection_failed`, `timeout`, `bad_reply`, `unauthorized`, and the DevBridge's own (`not_found`, `invalid_params`, `invalid_state`, `not_supported`, `unknown_method`, `internal`).
+
+## Security
+
+What this server is: a bridge from an MCP client to a game the developer is running, built with `-D MULTIANIM_DEV`. It does what the game's DevBridge does and nothing else.
+
+- **Transport.** The MCP side is stdio only: no HTTP or WebSocket endpoint for clients. The game side is the DevBridge of a HashLink game (`localhost` unless `HX_DEV_HOST` names another host) or, in relay mode, a WebSocket server bound to `127.0.0.1` (`HX_DEV_WS_HOST`) that a game page dials into. Nothing is sent anywhere else.
+- **Authentication.** Set `HX_DEV_TOKEN` in both the game and this server: it is sent with every call to a HashLink game and required in every browser game's `hello`. Without it, anything that can reach the DevBridge port can call it, which is the DevBridge's own default (`HX_DEV_BIND` on the game side chooses its bind address).
+- **No code execution.** No tool runs a shell command or evaluates code. `eval_manim` parses and builds a `.manim` snippet with the game's own parser to report its errors; nothing it builds is shown, kept or run. `game_op` calls a handler the game registered in its own code, and does whatever that handler does.
+- **Files.** This server reads two kinds of file: `HX_DEV_READY_FILE`, for the port a game wrote there, and `reload`'s `source_path`, only ever a `.manim` or `.anim` file, sent to the game as the new text of a resource. It writes no files.
+- **What the game gives back** is the game's own state: scene graph, parameters, traces, errors, screenshots, the data tables it registered, and the events its code emits with `DevBridge.emitEvent`. All of it comes from the developer's own build, not from players or the network. Treat it as you would the game's logs.
+- **Annotations.** Every tool declares [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations): the readers (`scene_graph`, `screenshot`, `eval_manim`, `list_*`, `get_data`, ...) are `readOnlyHint`; the setters and input tools (`set_parameter`, `reload`, `send_event`, `pause`, ...) write but are not destructive; `get_traces`, `get_errors`, `get_debugger_hits` and `get_game_events` can clear the buffer they read; `quit` and `game_op` (a command is whatever the game made it) are `destructiveHint`. Nothing is `openWorldHint`.
 
 ## Development
 

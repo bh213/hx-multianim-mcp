@@ -56,6 +56,35 @@ describe("tools", () => {
     }
   });
 
+  it("every tool has a title and complete annotations, none of them open-world", async () => {
+    const { client } = await start();
+    const { tools } = await client.listTools();
+    assert.ok(tools.length >= 43);
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    for (const t of tools) {
+      assert.equal(typeof t.title, "string", `${t.name} has a title`);
+      assert.ok(t.title.length > 0 && t.title.length <= 40, `${t.name} title is short`);
+      for (const hint of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
+        assert.equal(typeof t.annotations?.[hint], "boolean", `${t.name} declares ${hint}`);
+      }
+      assert.equal(t.annotations.openWorldHint, false, `${t.name} stays on the developer's machine`);
+      if (t.annotations.readOnlyHint) assert.equal(t.annotations.destructiveHint, false, `${t.name} read-only is not destructive`);
+    }
+    // The readers, the writers that only set or act, the drains, and the two that may destroy.
+    for (const name of ["scene_graph", "screenshot", "eval_manim", "list_data", "roll_pick", "ping", "events"]) {
+      assert.equal(byName[name].annotations.readOnlyHint, true, `${name} is read-only`);
+    }
+    for (const name of ["set_parameter", "set_visibility", "reload", "pause", "send_event", "send_events", "click_button", "step"]) {
+      assert.equal(byName[name].annotations.readOnlyHint, false, `${name} writes`);
+      assert.equal(byName[name].annotations.destructiveHint, false, `${name} is not destructive`);
+    }
+    for (const name of ["get_traces", "get_errors", "get_debugger_hits", "get_game_events"]) {
+      assert.equal(byName[name].annotations.readOnlyHint, false, `${name} can clear its buffer`);
+    }
+    assert.equal(byName.quit.annotations.destructiveHint, true);
+    assert.equal(byName.game_op.annotations.destructiveHint, true, "a game's command does whatever its handler does");
+  });
+
   it("with nothing connected, says so; a failed connect changes nothing", async () => {
     const { dev, call } = await start();
     const before = await call("ping");
@@ -160,6 +189,41 @@ describe("tools", () => {
     const res = await call("reload", { file: "ui/menu.manim", source_path: file });
     assert.equal(res.isError, false);
     assert.deepEqual(received, { method: "reload", params: { file: "ui/menu.manim", content: "version: 1.0\n" } });
+  });
+
+  it("reload reads only .manim and .anim files from source_path", async () => {
+    const { dev, call } = await start();
+    const calls = [];
+    await game(dev.relay.url, "web", {
+      handler: (method, params) => {
+        calls.push({ method, params });
+        return { success: true };
+      },
+    }).ready;
+    const { writeFileSync, mkdtempSync, mkdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "mcp-"));
+    const secret = join(dir, "secret.txt");
+    writeFileSync(secret, "hunter2\n");
+    const other = await call("reload", { file: "ui/menu.manim", source_path: secret });
+    assert.equal(other.isError, true);
+    assert.equal(other.body.code, "invalid_params");
+    assert.match(other.body.error, /\.manim or \.anim/);
+    const folder = join(dir, "folder.manim");
+    mkdirSync(folder);
+    const notAFile = await call("reload", { file: "ui/menu.manim", source_path: folder });
+    assert.equal(notAFile.isError, true);
+    assert.equal(notAFile.body.code, "invalid_params");
+    const notThere = await call("reload", { file: "ui/menu.manim", source_path: join(dir, "missing.anim") });
+    assert.equal(notThere.isError, true);
+    assert.equal(notThere.body.code, "not_found");
+    assert.deepEqual(calls, [], "nothing reached the game");
+    const anim = join(dir, "unit.anim");
+    writeFileSync(anim, "sheet: units\n");
+    const ok = await call("reload", { file: "units/unit.anim", source_path: anim });
+    assert.equal(ok.isError, false);
+    assert.deepEqual(calls, [{ method: "reload", params: { file: "units/unit.anim", content: "sheet: units\n" } }]);
   });
 
   it("reads the game's data: list_data, get_data and roll_pick, and says when a game has none", async () => {
