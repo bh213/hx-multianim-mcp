@@ -714,6 +714,18 @@ Common key codes: SPACE=32, ENTER=13, ESCAPE=27, TAB=9, A=65, 0=48, UP=38, DOWN=
   );
 
   server.registerTool(
+    "list_cursors",
+    {
+      title: "List cursors",
+      annotations: READ,
+      description:
+        "Every cursor name an interactive's `cursor =>` metadata can use: the OS cursors (default, pointer, move, text, hide, resize-*) and the ones registered from tiles (CursorManager.registerTileCursor, a .manim file's `#name cursor { }` block), each with its kind and, for a tile cursor, its size and hot point",
+      inputSchema: { target },
+    },
+    async ({ target }) => callBridge(ctx, "list_cursors", {}, target),
+  );
+
+  server.registerTool(
     "coordinate_transform",
     {
       title: "Transform coordinates",

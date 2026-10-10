@@ -33,6 +33,7 @@ It reaches a game on HashLink over the DevBridge's HTTP server, and a game in a 
 | `list_resources`            | Loaded sprites, fonts, `.manim`, `.anim` files                         |
 | `list_fonts`                | Registered font names                                                  |
 | `list_atlases`              | Loaded sprite atlases and tile/sprite names                            |
+| `list_cursors`              | Cursor names an interactive can use: OS ones and tile cursors (size, hot point) |
 | `coordinate_transform`      | Convert between scene and element-local coordinates                    |
 | `check_overlaps`            | Detect overlapping interactives/visuals to find layout bugs            |
 
